@@ -1,0 +1,62 @@
+Proposta di funzione di utilita del cittadino in un modello Stackelberg
+=====================================================================
+
+Idea generale
+-------------
+Il governo (leader) sceglie c_s, cioe la spesa pubblica per il controllo epidemico.
+Al crescere di c_s aumentano le restrizioni, che possono essere interpretate come
+un livello di socialita prescritto dal governo.
+
+Il cittadino (follower) sceglie la propria socialita effettiva x_t e puo discostarsi
+rispetto al livello prescritto.
+
+Variabili
+---------
+- x_t in [0,1]: socialita scelta dal cittadino al tempo t.
+- x_bar(c_s) in [0,1]: socialita prescritta dal governo, decrescente in c_s.
+- p_t: rischio percepito (tipicamente proporzionale a I_t / N).
+
+Esempi per x_bar(c_s)
+---------------------
+1) x_bar(c_s) = 1 / (1 + kappa * c_s)
+2) x_bar(c_s) = exp(-kappa * c_s)
+
+Funzione di utilita consigliata (forma mista)
+---------------------------------------------
+U_t(x_t; c_s, I_t) = a * log(x_t + epsilon)
+                     - lambda * p_t * x_t
+                     - (eta/2) * (x_t - x_bar(c_s))^2
+
+Interpretazione dei termini
+---------------------------
+- a * log(x_t + epsilon): beneficio della socialita (rendimenti decrescenti).
+- - lambda * p_t * x_t: costo sanitario atteso (piu rischio e piu contatti,
+  maggiore disutilita).
+- - (eta/2) * (x_t - x_bar(c_s))^2: costo di deviazione dalla prescrizione
+  (enforcement, multa, stigma, senso civico).
+
+Confronto tra specifiche
+------------------------
+- Parabola: semplice e spesso con best response quasi chiusa.
+- Log-lineare: piu realistica per i benefici della socialita.
+- Scelta pratica: forma mista log + penalita quadratica, robusta e interpretabile.
+
+Versione ancora piu semplice (quadratica)
+-----------------------------------------
+U_t(x_t) = b_t * x_t
+           - (q/2) * x_t^2
+           - (eta/2) * (x_t - x_bar(c_s))^2
+con b_t = b_0 - lambda * p_t.
+
+Best response (forma chiusa)
+----------------------------
+x_t* = Proj_[0,1] ( (b_t + eta * x_bar(c_s)) / (q + eta) )
+
+Dove Proj_[0,1] indica il clipping nell'intervallo [0,1].
+
+Indicazione operativa per la tesi
+---------------------------------
+1) Partire dal modello quadratico (trasparente e facilmente stimabile).
+2) Fare robustness check con la versione logaritmica.
+3) Analizzare sensibilita rispetto a eta (disciplina/compliance) e lambda
+   (avversione al rischio sanitario).

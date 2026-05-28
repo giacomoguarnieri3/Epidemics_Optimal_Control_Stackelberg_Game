@@ -7,7 +7,7 @@ STATO ATTUALE DEL CODICE
 Il file implementa un modello SIR deterministico con struttura Stackelberg:
 - Leader: Governo, che sceglie una intensita di controllo c_s.
 - Follower: Cittadini, che scelgono socialita x_t^* in risposta a prescrizione e rischio.
-- Dinamica: SIR discreta, con contagio modulato dalla socialita scelta.
+- Dinamica: SIR discreta estesa con compartimento ospedalizzati H, con contagio modulato dalla socialita scelta.
 
 Stato operativo attuale (main):
 - In una singola run vengono eseguite SOLO due simulazioni complete:
@@ -68,6 +68,9 @@ p_t = clip(rho_rischio * I_t / N, 0, 1)
 
 Quindi il rischio cresce con la quota di infetti.
 
+Nota implementativa: nella simulazione principale il rischio percepito viene calcolato su I_t + H_t
+(infetti attivi + ospedalizzati), sempre con clipping in [0,1].
+
 4) Utility del cittadino e best response
 ----------------------------------------
 
@@ -87,11 +90,14 @@ Best response calcolata numericamente su griglia in [0,1].
 Con fattore di contatto f(x)=x^potenza (in simulazione potenza=1):
 
 new_infections_t = f(x_t^*) * beta * S_t * I_t / N
-new_recoveries_t = gamma * I_t
+new_recoveries_non_h_t = gamma * I_t
+new_hospitalizations_t = h * new_infections_{t-tau}   (dopo il ritardo tau)
+new_recoveries_h_t = gamma_h * H_t
 
 S_{t+1} = S_t - new_infections_t
-I_{t+1} = I_t + new_infections_t - new_recoveries_t
-R_{t+1} = R_t + new_recoveries_t
+I_{t+1} = I_t + new_infections_t - new_hospitalizations_t - new_recoveries_non_h_t
+H_{t+1} = H_t + new_hospitalizations_t - new_recoveries_h_t
+R_{t+1} = R_t + new_recoveries_non_h_t + new_recoveries_h_t
 
 6) Costo del governo su finestra MPC
 ------------------------------------
@@ -103,7 +109,10 @@ Dove:
 - J_controllo = lambda_reg_controllo * c_s^2 * (orizzonte+1)
 
 Costo istantaneo:
-C_t = c_i*I_t + k*(exp(alpha*overload_t)-1)
+C_t = c_i*I_t + k*(exp(alpha*rapporto_occupazione_t)-1)
+
+dove rapporto_occupazione_t = pressione_ospedaliera_t / capacita_ospedaliera_infetti,
+con pressione_ospedaliera_t = H_t se disponibile, altrimenti I_t.
 
 Nel modello attuale il controllo entra soprattutto:
 - indirettamente (modificando I_t tramite comportamento)
@@ -200,10 +209,12 @@ E) Parametri comportamentali
   Intensita di percezione rischio epidemico.
 - eta_compliance = 12.0
   Forza di allineamento alla prescrizione (utile quadratica).
-- potenza_contatto_default = 1.0
-  Esponente che trasforma la socialita in moltiplicatore del contagio; con 1.0 il legame e lineare.
-- tipo_best_response_default = "quadratica"
-  Regime decisionale di default dei cittadini nelle funzioni di simulazione.
+
+Nota implementativa:
+- L'esponente di contatto non e definito come parametro globale; nel codice e passato come
+  argomento a fattore_contatto_da_socialita(...) ed e usato con potenza=1.0 nelle simulazioni.
+- Il tipo di best response viene selezionato esplicitamente nelle chiamate di simulazione
+  tramite tipo_best_response="quadratica" oppure "logaritmica".
 
 Utility quadratica:
 - dipende da eta_compliance e dal rischio percepito p_t.
@@ -212,7 +223,7 @@ Utility quadratica:
 Utility logaritmica (default correnti usati in run):
 - a_logaritmica_default = 1.5
 - epsilon_logaritmica_default = 1e-3
-- lambda_rischio_logaritmica_default = 1.0
+- lambda_rischio_logaritmica_default = 4.0
 - rho_rischio_logaritmica_default = rho_rischio (quindi 1.5)
 - num_grid_logaritmica_default = 101
 
@@ -283,12 +294,12 @@ DESCRIZIONE DELLE FUNZIONI PER GRUPPI (HELPER -> API)
     Ruolo: converte socialita in moltiplicatore del contagio.
   - stampa_progresso_simulazione(...)
     Ruolo: monitoraggio avanzamento simulazione.
-  - exp_sicura_scalata(argomento, scala=1.0)
-    Ruolo: exp robusta con clipping anti-overflow.
   - somma_sicura(valori)
     Ruolo: somma con saturazione numerica.
-  - overload_ospedaliero(I_t, capacita_ospedaliera)
+  - overload_ospedaliero(H_t, capacita_ospedaliera)
     Ruolo: overload ospedaliero normalizzato.
+  - ricostruisci_comparto_ospedalizzati_da_suscettibili(...)
+    Ruolo: ricostruisce H_t da S_t con ritardo ricoveri e uscite ospedaliere.
   - costruisci_griglia_controllo(c_min, c_max, num_punti)
     Ruolo: griglia lineare/geometrica per grid search su c_s.
 
@@ -299,6 +310,8 @@ DESCRIZIONE DELLE FUNZIONI PER GRUPPI (HELPER -> API)
     Ruolo: costo epidemiologico giornaliero.
   - calcola_costo_epidemiologico_cumulato(...)
     Ruolo: aggregazione costi su intervallo temporale.
+  - calcola_traiettoria_costo_epidemiologico_istantaneo(...)
+    Ruolo: traiettoria del costo istantaneo giorno per giorno.
   - calcola_costo_epidemiologico_cumulato_con_controllo_variabile(...)
     Ruolo: costo cumulato con schedule di controllo variabile.
 
@@ -324,7 +337,8 @@ DESCRIZIONE DELLE FUNZIONI PER GRUPPI (HELPER -> API)
 - API:
   - plot_dinamica_compartimenti_stackelberg(...)
     Ruolo: grafico compartimenti + incidenza.
-    Nota: la barra "nuovi infetti" usa beta*S*I/N senza moltiplicatore socialita.
+    Nota: la barra "nuovi infetti" usa la differenza realizzata S[t]-S[t+1], quindi e coerente
+    con la dinamica simulata (che include il moltiplicatore di socialita).
   - plot_controllo_e_comportamento_stackelberg(...)
     Ruolo: grafico diagnostico policy/comportamento/rischio.
     Nota: i pannelli nel plot sono 4.
@@ -366,6 +380,7 @@ COSA SUCCEDE IN UNA RUN ATTUALE (PASSO-PASSO)
 5) Metriche finali
 Per entrambe le simulazioni:
 - picco infetti e giorno del picco
+- picco ospedalizzati H e giorno del picco H
 - costo totale epidemico
 - compliance media x*/x_bar
 - gap medio x*-x_bar

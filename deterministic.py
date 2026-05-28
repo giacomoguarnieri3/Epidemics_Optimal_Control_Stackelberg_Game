@@ -26,8 +26,13 @@ import matplotlib.pyplot as plt
 print("Librerie importate con successo.")
 
 # =============================================================================
-# 2. Parametri del modello
+# 2. Parametri del modello — SEPARATI PER SCHEMA
 # =============================================================================
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║                    PARAMETRI COMUNI (EPIDEMIOLOGIA)                       ║
+# ║  Questi parametri restano identici tra modello quadratico e logaritmico   ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
 
 # Parametri demografici ed epidemiologici
 N        = 10_000     # Popolazione totale
@@ -38,16 +43,57 @@ S0       = N - I0 - R0_init  # Suscettibili iniziali
 beta     = 0.3        # Tasso di trasmissione  (contatti efficaci per giorno)(covid: 0.3-0.5)(influenza: 0.1-0.3)
 gamma    = 0.05       # Tasso di guarigione    (1/gamma = durata media malattia)
 
+# Parametro di efficacia della policy di controllo
+m_controllo = 2.0
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║              PARAMETRI COMUNI — COSTO EPIDEMIOLOGICO                      ║
+# ║  Questi parametri restano identici tra modello quadratico e logaritmico   ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
 # Coefficienti del costo epidemiologico giornaliero
-costo_infetto_giornaliero = 1000.0 #c_i
+costo_infetto_giornaliero = 10.0 #c_i (ridotto da 1000 per evitare overflow)
 costo_controllo_per_suscettibile = 10.0 #c_s
 
 # Parametri di saturazione ospedaliera nel costo degli infetti
-k_saturazione_ospedali = 1000.0  
-alpha_saturazione_ospedali = 0.2
+k_saturazione_ospedali = 10.0 # (ridotto da 1000 per evitare overflow)
+alpha_saturazione_ospedali = 0.01 # (ridotto da 0.2 per evitare overflow)
 
-# Parametro di efficacia della policy di controllo
-m_controllo = 2.0
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║           PARAMETRI COMUNI — GOVERNO (Stackelberg Follower)               ║
+# ║  Questi parametri restano identici tra modello quadratico e logaritmico   ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+# Mappa spesa → prescrizione (comune per entrambi i modelli)
+kappa_prescrizione = 1.0  # governo traduce spesa in prescrizione allo stesso modo
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║        PARAMETRI SEPARATI — MODELLO QUADRATICO (Citizen Utility)          ║
+# ║  Utilizzati solo quando si simula la versione quadratica                  ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+b0_quadratica = 1.0       # Intercetta utility positiva (beneficio base della socialità)
+q_quadratica = 0.5        # Coefficiente penalizzazione quadratica della prescrizione
+eta_compliance = 0.8      # Elasticità di compliance all'ordine del governo
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║       PARAMETRI SEPARATI — MODELLO LOGARITMICO (Citizen Utility)          ║
+# ║  Utilizzati solo quando si simula la versione logaritmica                 ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+a_logaritmica = 1.0                  # Scala della concavità (log(socialità))
+epsilon_logaritmica = 0.1            # Parametro di regolarizzazione (socialità minima)
+lambda_rischio_logaritmica = 0.5     # Peso della componente rischio epidemiologico
+
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║                   PARAMETRI MPC E CONTROLLO PERIODICO                     ║
+# ║                    (Parametri operativi della simulazione)                ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
 
 # Peso della penalizzazione quadratica del controllo nell'objective MPC
 lambda_reg_controllo = 10.0
