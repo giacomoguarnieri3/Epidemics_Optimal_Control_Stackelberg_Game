@@ -162,9 +162,9 @@ gamma    = 0.05       # Tasso di guarigione
 costo_infetto_giornaliero = 10.0  # c_i (ridotto da 1000 per evitare overflow)
 
 # Parametri di saturazione ospedaliera — RICALIBRAGI PER EVITARE OVERFLOW
-k_saturazione_ospedali = 10.0  # (ridotto da 50000 per evitare overflow)
-alpha_saturazione_ospedali = 0.01  # (ridotto da 6.0 per evitare overflow)
-capacita_ospedaliera_infetti = 250.0
+k_saturazione_ospedali = 100.0  # (ridotto da 50000 per evitare overflow)
+alpha_saturazione_ospedali = 6  # (ridotto da 6.0 per evitare overflow)
+capacita_ospedaliera_infetti = 150.0
 cap_argomento_exp_saturazione_default = 50.0
 
 # Parametri del compartimento ospedalizzati H_t
@@ -178,7 +178,8 @@ gamma_ospedaliera_default = 1.0 / degenza_media_ospedaliera_default
 m_controllo = 2.0
 
 # Peso della penalizzazione quadratica del controllo
-lambda_reg_controllo = 14.0
+lambda_reg_controllo_default = 14.0
+lambda_reg_controllo = lambda_reg_controllo_default
 
 # Parametri simulazione controllo periodico (MPC)
 intervallo_controllo_default = 80
@@ -194,9 +195,13 @@ mostra_grafici_default = True
 # Parametri numerici
 num_grid_points_default = 401
 step_percent_progress_default = 5
+potenza_contatto_default = 1.0
+lambda_reg_controllo_cumulato_default = 0.0
 
-# Flag di assetto: True = benchmark prudente corrente, False = assetto target-driven
-assetto_prudente_default = True
+# Profilo di esecuzione: mantiene naming esplicito e scalabile
+profilo_prudente = "prudente"
+profilo_target_driven = "target-driven"
+profilo_esecuzione_default = profilo_prudente
 
 # Parametri scansione calibrazione (alpha, lambda): utili per confronti di sensibilita
 esegui_scansione_parametri_default = False
@@ -226,30 +231,23 @@ top_k_stage1_default = 3
 fattori_raffinamento_lambda_default = [0.7, 0.85, 1.0, 1.15, 1.35]
 fattori_raffinamento_cmax_default = [0.75, 0.9, 1.0, 1.1, 1.25]
 
-if assetto_prudente_default:
-    esegui_scansione_parametri_default = False
-    esegui_scansione_trigger_default = False
-    esegui_scansione_comportamento_default = False
-    esegui_scansione_target_picco_default = False
-else:
-    esegui_scansione_parametri_default = False
-    esegui_scansione_trigger_default = False
-    esegui_scansione_comportamento_default = False
-    esegui_scansione_target_picco_default = True
-
 T        = 1000        # Durata della simulazione
 t        = np.arange(0, T + 1)
 
 # ===== NUOVI PARAMETRI PER STACKELBERG (Cittadini) =====
 # Prescrizione sociale: x_bar(c_s)
-kappa_prescrizione = 0.05
+kappa_prescrizione_default = 0.05
+kappa_prescrizione = kappa_prescrizione_default
 target_socialita_al_massimo_controllo = 1.0 / (1.0 + kappa_prescrizione * c_max_default)
 
 # Rischio percepito
-rho_rischio = 1.5  # scala da I_t/N a rischio individuale
+rho_rischio_default = 1.5  # scala da I_t/N a rischio individuale
+rho_rischio = rho_rischio_default
 
 # Utilita cittadino (forma quadratica)
-eta_compliance = 12.0  # costo di deviazione dalla prescrizione (compliance)
+eta_compliance_default = 12.0  # costo di deviazione dalla prescrizione (compliance)
+eta_compliance = eta_compliance_default
+lambda_rischio_quadratica_default = 1.0
 
 # Utilita cittadino (forma logaritmica pura): nessun termine quadratico di compliance
 a_logaritmica_default = 1.5
@@ -332,7 +330,7 @@ def socialita_prescritta_da_governo(c_s, kappa, tipo="logistica"):
         raise ValueError(f"Tipo prescrizione non riconosciuto: {tipo}")
 
 
-def rischio_percepito(I_t, N, rho_rischio=1.0):
+def rischio_percepito(I_t, N, rho_rischio=rho_rischio_default):
     """
     Trasforma il numero di infetti in rischio percepito dal cittadino.
     
@@ -360,7 +358,7 @@ def best_response_cittadino_quadratica(
     x_bar,
     p_t,
     eta_compliance,
-    lambda_rischio=1.0,
+    lambda_rischio=lambda_rischio_quadratica_default,
 ):
     """
     Best response del cittadino per utility quadratica.
@@ -382,7 +380,7 @@ def best_response_cittadino_logaritmica(
     a,
     epsilon,
     lambda_rischio,
-    num_grid=101,
+    num_grid=num_grid_logaritmica_default,
 ):
     """
     Best response del cittadino per utility LOGARITMICA pura (ora dipende da x_bar).
@@ -405,7 +403,7 @@ def best_response_cittadino_logaritmica(
     return float(griglia[idx_best])
 
 
-def fattore_contatto_da_socialita(x_t, potenza=1.0):
+def fattore_contatto_da_socialita(x_t, potenza=potenza_contatto_default):
     """
     Trasforma socialita effettiva in moltiplicatore del termine di infezione.
     
@@ -448,6 +446,37 @@ def fattore_contatto_da_socialita(x_t, potenza=1.0):
 # -----------------------------------------------------------------------------
 # Queste utility sono trasversali: non definiscono comportamento economico, ma
 # supportano stabilita numerica, progress logging e costruzione griglie.
+def configura_flag_scansioni(profilo_esecuzione):
+    """
+    Restituisce la configurazione dei flag di scansione in base al profilo.
+    """
+    if profilo_esecuzione == profilo_prudente:
+        return {
+            "esegui_scansione_parametri": False,
+            "esegui_scansione_trigger": False,
+            "esegui_scansione_comportamento": False,
+            "esegui_scansione_target_picco": False,
+        }
+    if profilo_esecuzione == profilo_target_driven:
+        return {
+            "esegui_scansione_parametri": False,
+            "esegui_scansione_trigger": False,
+            "esegui_scansione_comportamento": False,
+            "esegui_scansione_target_picco": True,
+        }
+    raise ValueError(
+        f"Profilo non riconosciuto: {profilo_esecuzione}. "
+        f"Usare '{profilo_prudente}' o '{profilo_target_driven}'."
+    )
+
+
+flag_scansioni_default = configura_flag_scansioni(profilo_esecuzione_default)
+esegui_scansione_parametri_default = flag_scansioni_default["esegui_scansione_parametri"]
+esegui_scansione_trigger_default = flag_scansioni_default["esegui_scansione_trigger"]
+esegui_scansione_comportamento_default = flag_scansioni_default["esegui_scansione_comportamento"]
+esegui_scansione_target_picco_default = flag_scansioni_default["esegui_scansione_target_picco"]
+
+
 def stampa_progresso_simulazione(
     giorno_corrente,
     giorni_totali,
@@ -481,38 +510,6 @@ def overload_ospedaliero(H_t, capacita_ospedaliera):
     return max(0.0, (float(H_t) - capacita_effettiva) / capacita_effettiva)
 
 
-def ricostruisci_comparto_ospedalizzati_da_suscettibili(
-    S,
-    h_ospedalizzazione=h_ospedalizzazione_default,
-    tau_ospedalizzazione=tau_ospedalizzazione_default,
-    gamma_ospedaliera=gamma_ospedaliera_default,
-    H_t0=H_t0_default,
-):
-    """Ricostruisce H_t da S_t usando nuovi infetti ritardati e uscite esponenziali."""
-    if len(S) < 2:
-        return np.array([max(0.0, float(H_t0))], dtype=float)
-
-    nuovi_infetti = np.maximum(0.0, S[:-1] - S[1:])
-    T_loc = len(nuovi_infetti)
-    H = np.zeros(T_loc + 1, dtype=float)
-    H[0] = max(0.0, float(H_t0))
-
-    h_eff = float(np.clip(h_ospedalizzazione, 0.0, 1.0))
-    tau_eff = int(max(0, tau_ospedalizzazione))
-    gamma_h_eff = float(max(0.0, gamma_ospedaliera))
-
-    for giorno in range(T_loc):
-        if giorno >= tau_eff:
-            nuovi_ricoveri = h_eff * nuovi_infetti[giorno - tau_eff]
-        else:
-            nuovi_ricoveri = 0.0
-
-        uscite_H = gamma_h_eff * H[giorno]
-        H[giorno + 1] = max(0.0, H[giorno] + nuovi_ricoveri - uscite_H)
-
-    return H
-
-
 def costruisci_griglia_controllo(c_min, c_max, num_punti):
     """Usa una griglia logaritmica quando i bound coprono molti ordini di grandezza."""
     if num_punti < 2:
@@ -542,12 +539,15 @@ def calcola_costo_epidemiologico_istantaneo(
     costo_infetto_giornaliero,
     k_saturazione_ospedali,
     alpha_saturazione_ospedali,
-    H_t=None,
+    H_t,
     cap_argomento_exp_saturazione=cap_argomento_exp_saturazione_default,
 ):
     """Costo epidemiologico istantaneo."""
+    # PROMEMORIA TESI: quando verra introdotto il compartimento decessi D,
+    # aggiungere qui un termine dedicato (es. costo_decessi_giornaliero * delta_D_t)
+    # nella loss istantanea, evitando doppio conteggio sui cumulati.
     _ = S_t
-    pressione_ospedaliera = I_t if H_t is None else H_t
+    pressione_ospedaliera = H_t
     capacita_effettiva = max(float(capacita_ospedaliera_infetti), 1e-12)
     rapporto_occupazione_t = max(0.0, float(pressione_ospedaliera) / capacita_effettiva)
     arg_exp = float(np.clip(alpha_saturazione_ospedali * rapporto_occupazione_t, a_min=0.0, a_max=cap_argomento_exp_saturazione))
@@ -560,16 +560,12 @@ def calcola_costo_epidemiologico_istantaneo(
 def calcola_costo_epidemiologico_cumulato(
     S,
     I,
+    H,
     costo_infetto_giornaliero,
     k_saturazione_ospedali,
     alpha_saturazione_ospedali,
     t0,
     giorno_corrente,
-    H=None,
-    h_ospedalizzazione=h_ospedalizzazione_default,
-    tau_ospedalizzazione=tau_ospedalizzazione_default,
-    gamma_ospedaliera=gamma_ospedaliera_default,
-    H_t0=H_t0_default,
     cap_argomento_exp_saturazione=cap_argomento_exp_saturazione_default,
 ):
     """Costo epidemiologico cumulato tra t0 e giorno_corrente."""
@@ -577,14 +573,6 @@ def calcola_costo_epidemiologico_cumulato(
         raise ValueError("Indici di tempo non validi.")
     if giorno_corrente >= len(S) or giorno_corrente >= len(I):
         raise ValueError("giorno_corrente eccede le traiettorie.")
-    if H is None:
-        H = ricostruisci_comparto_ospedalizzati_da_suscettibili(
-            S,
-            h_ospedalizzazione=h_ospedalizzazione,
-            tau_ospedalizzazione=tau_ospedalizzazione,
-            gamma_ospedaliera=gamma_ospedaliera,
-            H_t0=H_t0,
-        )
     if len(H) != len(S):
         raise ValueError("La traiettoria H deve avere la stessa lunghezza di S.")
 
@@ -607,16 +595,16 @@ def calcola_costo_epidemiologico_cumulato(
 def calcola_traiettoria_costo_epidemiologico_istantaneo(
     S,
     I,
+    H,
     costo_infetto_giornaliero,
     k_saturazione_ospedali,
     alpha_saturazione_ospedali,
-    H=None,
     cap_argomento_exp_saturazione=cap_argomento_exp_saturazione_default,
 ):
     """Ritorna il costo epidemiologico istantaneo giorno per giorno."""
     if len(S) != len(I):
         raise ValueError("Le traiettorie S e I devono avere la stessa lunghezza.")
-    if H is not None and len(H) != len(S):
+    if len(H) != len(S):
         raise ValueError("La traiettoria H deve avere la stessa lunghezza di S e I.")
 
     costi = np.array([
@@ -626,7 +614,7 @@ def calcola_traiettoria_costo_epidemiologico_istantaneo(
             costo_infetto_giornaliero,
             k_saturazione_ospedali,
             alpha_saturazione_ospedali,
-            H_t=None if H is None else H[giorno],
+            H_t=H[giorno],
             cap_argomento_exp_saturazione=cap_argomento_exp_saturazione,
         )
         for giorno in range(len(S))
@@ -637,18 +625,14 @@ def calcola_traiettoria_costo_epidemiologico_istantaneo(
 def calcola_costo_epidemiologico_cumulato_con_controllo_variabile(
     S,
     I,
+    H,
     costo_infetto_giornaliero,
     c_schedule,
     k_saturazione_ospedali,
     alpha_saturazione_ospedali,
     t0,
     giorno_corrente,
-    lambda_reg_controllo=0.0,
-    H=None,
-    h_ospedalizzazione=h_ospedalizzazione_default,
-    tau_ospedalizzazione=tau_ospedalizzazione_default,
-    gamma_ospedaliera=gamma_ospedaliera_default,
-    H_t0=H_t0_default,
+    lambda_reg_controllo=lambda_reg_controllo_cumulato_default,
     cap_argomento_exp_saturazione=cap_argomento_exp_saturazione_default,
 ):
     """Costo cumulato con c_s variabile nel tempo."""
@@ -658,14 +642,6 @@ def calcola_costo_epidemiologico_cumulato_con_controllo_variabile(
         raise ValueError("giorno_corrente eccede le traiettorie.")
     if len(c_schedule) == 0:
         raise ValueError("c_schedule non può essere vuoto.")
-    if H is None:
-        H = ricostruisci_comparto_ospedalizzati_da_suscettibili(
-            S,
-            h_ospedalizzazione=h_ospedalizzazione,
-            tau_ospedalizzazione=tau_ospedalizzazione,
-            gamma_ospedaliera=gamma_ospedaliera,
-            H_t0=H_t0,
-        )
     if len(H) != len(S):
         raise ValueError("La traiettoria H deve avere la stessa lunghezza di S.")
 
@@ -702,10 +678,10 @@ def simula_finestra_predizione_stackelberg(
     S_init, I_init, R_init, N, beta, gamma,
     orizzonte, c_s,
     kappa_prescrizione, rho_rischio, eta_compliance,
-    a_logaritmica=1.5,
-    epsilon_logaritmica=1e-3,
-    lambda_rischio_logaritmica=1.0,
-    num_grid_logaritmica=101,
+    a_logaritmica=a_logaritmica_default,
+    epsilon_logaritmica=epsilon_logaritmica_default,
+    lambda_rischio_logaritmica=lambda_rischio_logaritmica_default,
+    num_grid_logaritmica=num_grid_logaritmica_default,
     h_ospedalizzazione=h_ospedalizzazione_default,
     tau_ospedalizzazione=tau_ospedalizzazione_default,
     gamma_ospedaliera=gamma_ospedaliera_default,
@@ -775,7 +751,7 @@ def simula_finestra_predizione_stackelberg(
         
         x_star_pred[k] = x_star
         
-        fattore = fattore_contatto_da_socialita(x_star, potenza=1.0)
+        fattore = fattore_contatto_da_socialita(x_star, potenza=potenza_contatto_default)
         new_infections = fattore * beta * S_pred[k] * I_pred[k] / N
         nuovi_infetti_hist[k] = new_infections
 
@@ -804,14 +780,17 @@ def costo_previsto_su_finestra_stackelberg(
     k_saturazione_ospedali, alpha_saturazione_ospedali,
     c_s, kappa_prescrizione,
     rho_rischio,
-    eta_compliance, a_logaritmica=1.5, epsilon_logaritmica=1e-3, lambda_rischio_logaritmica=1.0,
-    num_grid_logaritmica=101,
+    eta_compliance,
+    a_logaritmica=a_logaritmica_default,
+    epsilon_logaritmica=epsilon_logaritmica_default,
+    lambda_rischio_logaritmica=lambda_rischio_logaritmica_default,
+    num_grid_logaritmica=num_grid_logaritmica_default,
     h_ospedalizzazione=h_ospedalizzazione_default,
     tau_ospedalizzazione=tau_ospedalizzazione_default,
     gamma_ospedaliera=gamma_ospedaliera_default,
     H_init=H_t0_default,
     cap_argomento_exp_saturazione=cap_argomento_exp_saturazione_default,
-    lambda_reg_controllo=lambda_reg_controllo,
+    lambda_reg_controllo=lambda_reg_controllo_default,
     tipo_best_response="quadratica",
 ):
     """
@@ -846,10 +825,9 @@ def costo_previsto_su_finestra_stackelberg(
     )
     
     costo_epidemico = calcola_costo_epidemiologico_cumulato(
-        S_pred, I_pred,
+        S_pred, I_pred, H_pred,
         costo_infetto_giornaliero, k_saturazione_ospedali, alpha_saturazione_ospedali,
         t0=0, giorno_corrente=orizzonte,
-        H=H_pred,
         cap_argomento_exp_saturazione=cap_argomento_exp_saturazione,
     )
     
@@ -862,14 +840,17 @@ def ottimizza_c_s_su_finestra_stackelberg(
     orizzonte, costo_infetto_giornaliero, k_saturazione_ospedali, alpha_saturazione_ospedali,
     c_iniziale, c_min, c_max,
     kappa_prescrizione, rho_rischio,
-    eta_compliance, a_logaritmica=1.5, epsilon_logaritmica=1e-3, lambda_rischio_logaritmica=1.0,
-    num_grid_logaritmica=101,
+    eta_compliance,
+    a_logaritmica=a_logaritmica_default,
+    epsilon_logaritmica=epsilon_logaritmica_default,
+    lambda_rischio_logaritmica=lambda_rischio_logaritmica_default,
+    num_grid_logaritmica=num_grid_logaritmica_default,
     h_ospedalizzazione=h_ospedalizzazione_default,
     tau_ospedalizzazione=tau_ospedalizzazione_default,
     gamma_ospedaliera=gamma_ospedaliera_default,
     H_init=H_t0_default,
     cap_argomento_exp_saturazione=cap_argomento_exp_saturazione_default,
-    lambda_reg_controllo=lambda_reg_controllo,
+    lambda_reg_controllo=lambda_reg_controllo_default,
     tipo_best_response="quadratica",
 ):
     """
@@ -889,14 +870,9 @@ def ottimizza_c_s_su_finestra_stackelberg(
         S_init, I_init, R_init, N, beta, gamma, orizzonte,
         costo_infetto_giornaliero, k_saturazione_ospedali, alpha_saturazione_ospedali,
         c_iniziale_clip, kappa_prescrizione, rho_rischio,
-        eta_compliance, a_logaritmica, epsilon_logaritmica, lambda_rischio_logaritmica,
-        num_grid_logaritmica,
-        h_ospedalizzazione,
-        tau_ospedalizzazione,
-        gamma_ospedaliera,
-        H_init,
-        cap_argomento_exp_saturazione,
-        lambda_reg_controllo,
+        eta_compliance, a_logaritmica, epsilon_logaritmica, lambda_rischio_logaritmica, num_grid_logaritmica,
+        h_ospedalizzazione, tau_ospedalizzazione, gamma_ospedaliera,
+        H_init, cap_argomento_exp_saturazione, lambda_reg_controllo,
         tipo_best_response,
     )
     
@@ -958,31 +934,22 @@ def ottimizza_c_s_su_finestra_stackelberg(
 # 5B) Simulazione completa con controllo periodico (MPC)
 # -----------------------------------------------------------------------------
 def simula_sir_stackelberg_con_controllo_periodico(
-    S_t0,
-    I_t0,
-    R_t0,
-    N,
-    beta,
-    gamma,
-    T,
-    costo_infetto_giornaliero,
-    k_saturazione_ospedali,
-    alpha_saturazione_ospedali,
+    S_t0, I_t0, R_t0, N, beta, gamma, T,
+    costo_infetto_giornaliero, k_saturazione_ospedali, alpha_saturazione_ospedali,
     c_iniziale,
     intervallo_controllo=intervallo_controllo_default,
     orizzonte_predizione=orizzonte_predizione_default,
-    c_min=c_min_default,
-    c_max=c_max_default,
+    c_min=c_min_default, c_max=c_max_default,
     soglia_attivazione_controllo=soglia_attivazione_controllo_default,
     fattore_isteresi=fattore_isteresi_default,
-    lambda_reg_controllo=lambda_reg_controllo,
-    kappa_prescrizione=kappa_prescrizione,
-    rho_rischio=rho_rischio,
-    eta_compliance=eta_compliance,
-    a_logaritmica=1.5,
-    epsilon_logaritmica=1e-3,
-    lambda_rischio_logaritmica=1.0,
-    num_grid_logaritmica=101,
+    lambda_reg_controllo=lambda_reg_controllo_default,
+    kappa_prescrizione=kappa_prescrizione_default,
+    rho_rischio=rho_rischio_default,
+    eta_compliance=eta_compliance_default,
+    a_logaritmica=a_logaritmica_default,
+    epsilon_logaritmica=epsilon_logaritmica_default,
+    lambda_rischio_logaritmica=lambda_rischio_logaritmica_default,
+    num_grid_logaritmica=num_grid_logaritmica_default,
     h_ospedalizzazione=h_ospedalizzazione_default,
     tau_ospedalizzazione=tau_ospedalizzazione_default,
     gamma_ospedaliera=gamma_ospedaliera_default,
@@ -1015,17 +982,17 @@ def simula_sir_stackelberg_con_controllo_periodico(
     
     giorno = 0
     c_guess = float(np.clip(c_iniziale, c_min, c_max))
-    ultimo_checkpoint_stampato = -1
-    controllo_attivo = False
-    prossimo_giorno_ottimizzazione = None
-    c_applicato = c_min
-    soglia_infetti_assoluta = soglia_attivazione_controllo * N
-    soglia_bassa = soglia_infetti_assoluta * fattore_isteresi
-    h_eff = float(np.clip(h_ospedalizzazione, 0.0, 1.0))
-    tau_eff = int(max(0, tau_ospedalizzazione))
-    gamma_h_eff = float(max(0.0, gamma_ospedaliera))
+    ultimo_checkpoint_stampato = -1                             # Per evitare di stampare troppo spesso, usiamo un checkpoint basato su percentuale di completamento.
+    controllo_attivo = False                                    # Stato del controllo (attivo o no) basato sulla soglia di infetti.
+    prossimo_giorno_ottimizzazione = None                       # Giorno in cui il governo eseguirà la prossima ottimizzazione (se controllo attivo).
+    c_applicato = c_min                                         # c_s effettivamente applicato oggi (inizialmente nessun controllo).  
+    soglia_infetti_assoluta = soglia_attivazione_controllo * N  # Soglia in termini di numero assoluto di infetti per attivare il controllo.
+    soglia_bassa = soglia_infetti_assoluta * fattore_isteresi   # Soglia bassa per disattivare il controllo, creando un'isteresi per evitare on-off frequenti.
+    h_eff = float(np.clip(h_ospedalizzazione, 0.0, 1.0))        # Efficienza ospedalizzazione, clippata per stabilità numerica.
+    tau_eff = int(max(0, tau_ospedalizzazione))                 # Tempo di latenza ospedalizzazione, clippato per stabilità numerica.
+    gamma_h_eff = float(max(0.0, gamma_ospedaliera))            # Tasso di guarigione ospedaliera, clippato per stabilità numerica.
 
-    if tipo_best_response not in ("quadratica", "logaritmica"):
+    if tipo_best_response not in ("quadratica", "logaritmica"): 
         raise ValueError(
             "tipo_best_response deve essere 'quadratica' oppure 'logaritmica'."
         )
@@ -1037,19 +1004,20 @@ def simula_sir_stackelberg_con_controllo_periodico(
     while giorno < T:
         # Attivazione/disattivazione controllo su soglia infetti
         infetti_attivi = I[giorno] + H[giorno]
-        if (not controllo_attivo) and (infetti_attivi >= soglia_infetti_assoluta):
+        if (not controllo_attivo) and (infetti_attivi >= soglia_infetti_assoluta): 
             controllo_attivo = True
-            prossimo_giorno_ottimizzazione = giorno
+            prossimo_giorno_ottimizzazione = giorno #
         
-        if controllo_attivo and (infetti_attivi < soglia_bassa):
+        if controllo_attivo and (infetti_attivi < soglia_bassa): 
             controllo_attivo = False
             prossimo_giorno_ottimizzazione = None
             c_applicato = c_min
         
         # Ottimizzazione periodica del governo
-        if controllo_attivo and (prossimo_giorno_ottimizzazione is not None) and (giorno >= prossimo_giorno_ottimizzazione):
+        if controllo_attivo and (prossimo_giorno_ottimizzazione is not None) and (giorno >= prossimo_giorno_ottimizzazione): 
             orizzonte_ottimizzazione = min(orizzonte_predizione, T - giorno)
             
+            # !!!Ottimizza c_s sulla finestra di predizione considerando la best response dei cittadini
             c_ottimo, info = ottimizza_c_s_su_finestra_stackelberg(
                 S[giorno], I[giorno],  R[giorno], N, beta, gamma,
                 orizzonte_ottimizzazione, costo_infetto_giornaliero,
@@ -1058,9 +1026,7 @@ def simula_sir_stackelberg_con_controllo_periodico(
                 kappa_prescrizione, rho_rischio, eta_compliance,
                 a_logaritmica, epsilon_logaritmica, lambda_rischio_logaritmica,
                 num_grid_logaritmica,
-                h_eff,
-                tau_eff,
-                gamma_h_eff,
+                h_eff, tau_eff, gamma_h_eff,
                 H[giorno],
                 cap_argomento_exp_saturazione,
                 lambda_reg_controllo,
@@ -1084,21 +1050,15 @@ def simula_sir_stackelberg_con_controllo_periodico(
 
         if tipo_best_response == "quadratica":
             x_star = best_response_cittadino_quadratica(
-                x_bar,
-                p_t,
-                eta_compliance,
+                x_bar, p_t, eta_compliance,
             )
         else:
             x_star = best_response_cittadino_logaritmica(
-                x_bar,
-                p_t,
-                a_logaritmica,
-                epsilon_logaritmica,
-                lambda_rischio_logaritmica,
-                num_grid=num_grid_logaritmica,
+                x_bar, p_t, a_logaritmica, epsilon_logaritmica,
+                lambda_rischio_logaritmica, num_grid=num_grid_logaritmica,
             )
-        
-        fattore = fattore_contatto_da_socialita(x_star, potenza=1.0)
+        # La socialita effettiva x_star influenza il numero di nuovi infetti tramite il fattore di contatto.
+        fattore = fattore_contatto_da_socialita(x_star, potenza=potenza_contatto_default)
         new_infections = fattore * beta * S[giorno] * I[giorno] / N
         nuovi_infetti_hist[giorno] = new_infections
 
@@ -1109,7 +1069,7 @@ def simula_sir_stackelberg_con_controllo_periodico(
 
         new_recoveries_non_h = gamma * I[giorno]
         new_recoveries_h = gamma_h_eff * H[giorno]
-        
+        # Aggiorna i compartimenti S, I, H, R con i nuovi flussi, assicurandosi di non andare sotto zero.
         S[giorno + 1] = S[giorno] - new_infections
         I[giorno + 1] = max(0.0, I[giorno] + new_infections - new_hospitalizations - new_recoveries_non_h)
         H[giorno + 1] = max(0.0, H[giorno] + new_hospitalizations - new_recoveries_h)
@@ -1131,8 +1091,7 @@ def simula_sir_stackelberg_con_controllo_periodico(
     
     if verbose_progress:
         print("[Stackelberg MPC] simulazione completata.")
-    
-    return S, I, R, c_schedule, x_bar_schedule, x_star_schedule, p_rischio_schedule, log_ottimizzazione
+    return S, I, R, H, c_schedule, x_bar_schedule, x_star_schedule, p_rischio_schedule, log_ottimizzazione
 
 
 # =============================================================================
@@ -1177,8 +1136,8 @@ def plot_dinamica_compartimenti_stackelberg(
     ax2 = axes[1]
     # Incidenza realizzata coerente con la dinamica simulata.
     nuovi_infetti = np.maximum(0.0, S[:-1] - S[1:])
-    ax2.bar(t[:-1], nuovi_infetti, color="crimson", alpha=0.6, width=1,
-            label="Nuovi infetti / giorno")
+    ax2.plot(t[:-1], nuovi_infetti, color="crimson", lw=2,
+             label="Nuovi infetti / giorno")
     if H is not None:
         ax2_right = ax2.twinx()
         ax2_right.plot(t, H, color="darkorange", lw=1.8, alpha=0.85, label="Ospedalizzati H(t)")
@@ -1200,7 +1159,7 @@ def plot_dinamica_compartimenti_stackelberg(
 
 def plot_controllo_e_comportamento_stackelberg(
     t, S, I, c_schedule, x_bar_schedule, x_star_schedule, p_rischio_schedule,
-    H=None,
+    H,
     simulation_label="quadratica",
     output_path="sir_stackelberg_analisi.png",
 ):
@@ -1212,10 +1171,10 @@ def plot_controllo_e_comportamento_stackelberg(
     costo_istantaneo = calcola_traiettoria_costo_epidemiologico_istantaneo(
         S,
         I,
+        H,
         costo_infetto_giornaliero,
         k_saturazione_ospedali,
         alpha_saturazione_ospedali,
-        H=H,
     )
     costo_istantaneo_controllo = costo_istantaneo[:-1]
     
@@ -1291,7 +1250,7 @@ def esegui_scansione_alpha_lambda(
 
     for alpha_val in alpha_values:
         for lambda_val in lambda_values:
-            _, I_tmp, _, c_tmp, _, _, _, _ = simula_sir_stackelberg_con_controllo_periodico(
+            _, I_tmp, _, _, c_tmp, _, _, _, _ = simula_sir_stackelberg_con_controllo_periodico(
                 S_t0, I_t0, R_t0, N, beta, gamma,
                 T_scan, costo_infetto_giornaliero, k_saturazione_ospedali, alpha_val,
                 c_iniziale=c_iniziale_default,
@@ -1316,7 +1275,7 @@ def esegui_scansione_alpha_lambda(
                 "lambda": float(lambda_val),
                 "picco": picco_infetti,
                 "giorno_picco": t_picco,
-                "quota_tempo_cmax": quota_tempo_cmax,
+                "quota_cmax": quota_tempo_cmax,
             })
 
     risultati.sort(key=lambda x: (x["picco"], x["quota_cmax"]))
@@ -1347,7 +1306,7 @@ def esegui_scansione_trigger_isteresi(
 
     for soglia_val in soglia_values:
         for isteresi_val in isteresi_values:
-            _, I_tmp, _, c_tmp, _, _, _, _ = simula_sir_stackelberg_con_controllo_periodico(
+            _, I_tmp, _, _, c_tmp, _, _, _, _ = simula_sir_stackelberg_con_controllo_periodico(
                 S_t0,
                 I_t0,
                 R_t0,
@@ -1417,7 +1376,7 @@ def esegui_scansione_comportamento(
     for kappa_val in kappa_values:
         for eta_val in eta_values:
             for rho_val in rho_values:
-                _, I_tmp, _, c_tmp, x_bar_tmp, x_star_tmp, _, _ = simula_sir_stackelberg_con_controllo_periodico(
+                _, I_tmp, _, _, c_tmp, x_bar_tmp, x_star_tmp, _, _ = simula_sir_stackelberg_con_controllo_periodico(
                     S_t0,
                     I_t0,
                     R_t0,
@@ -1500,7 +1459,7 @@ def calibra_parametri_logaritmica_min_picco_due_stadi(
     Criterio di selezione: minimizzare il picco massimo degli infetti.
     """
     def valuta_tripla(a_val, lambda_rischio_val, rho_val):
-        S_tmp, I_tmp, _, c_tmp, x_bar_tmp, x_star_tmp, _, _ = simula_sir_stackelberg_con_controllo_periodico(
+        S_tmp, I_tmp, _, H_tmp, c_tmp, x_bar_tmp, x_star_tmp, _, _ = simula_sir_stackelberg_con_controllo_periodico(
             S_t0,
             I_t0,
             R_t0,
@@ -1538,6 +1497,7 @@ def calibra_parametri_logaritmica_min_picco_due_stadi(
         costo_totale = calcola_costo_epidemiologico_cumulato_con_controllo_variabile(
             S_tmp,
             I_tmp,
+            H_tmp,
             costo_infetto_giornaliero,
             c_tmp,
             k_saturazione_ospedali,
@@ -1674,7 +1634,7 @@ def valuta_scenario_target_picco(
     c_min_eff = min(c_min_default, c_max_val)
     c_init_eff = float(np.clip(c_iniziale_default, c_min_eff, c_max_val))
 
-    S_tmp, I_tmp, _, c_tmp, _, _, _, _ = simula_sir_stackelberg_con_controllo_periodico(
+    S_tmp, I_tmp, _, H_tmp, c_tmp, _, _, _, _ = simula_sir_stackelberg_con_controllo_periodico(
         S_t0,
         I_t0,
         R_t0,
@@ -1710,6 +1670,7 @@ def valuta_scenario_target_picco(
     costo_totale = calcola_costo_epidemiologico_cumulato_con_controllo_variabile(
         S_tmp,
         I_tmp,
+        H_tmp,
         costo_infetto_giornaliero,
         c_tmp,
         k_saturazione_ospedali,
@@ -1734,7 +1695,8 @@ def valuta_scenario_target_picco(
 
 def esegui_scansione_target_picco(
     lambda_values, c_max_values, T_scan,
-    target_picco_percent=10.0, tolleranza_percent=1.0,
+    target_picco_percent=target_picco_percent_default,
+    tolleranza_percent=tolleranza_target_percent_default,
 ):
     """
     Esegue una scansione su (lambda_reg_controllo, c_max) con benchmark sul picco infetti.
@@ -1753,7 +1715,7 @@ def esegui_scansione_target_picco(
             c_min_eff = min(c_min_default, c_max_val)
             c_init_eff = float(np.clip(c_iniziale_default, c_min_eff, c_max_val))
 
-            S_tmp, I_tmp, _, c_tmp, _, _, _, _ = simula_sir_stackelberg_con_controllo_periodico(
+            S_tmp, I_tmp, _, H_tmp, c_tmp, _, _, _, _ = simula_sir_stackelberg_con_controllo_periodico(
                 S_t0,
                 I_t0,
                 R_t0,
@@ -1789,6 +1751,7 @@ def esegui_scansione_target_picco(
             costo_totale = calcola_costo_epidemiologico_cumulato_con_controllo_variabile(
                 S_tmp,
                 I_tmp,
+                H_tmp,
                 costo_infetto_giornaliero,
                 c_tmp,
                 k_saturazione_ospedali,
@@ -1864,8 +1827,8 @@ def esegui_scansione_target_picco_due_stadi(
     lambda_values_stage1,
     c_max_values_stage1,
     T_scan,
-    target_picco_percent=10.0,
-    tolleranza_percent=1.0,
+    target_picco_percent=target_picco_percent_default,
+    tolleranza_percent=tolleranza_target_percent_default,
     top_k_stage1=3,
     fattori_raffinamento_lambda=None,
     fattori_raffinamento_cmax=None,
@@ -1996,145 +1959,203 @@ def esegui_scansione_target_picco_due_stadi(
 # Blocco eseguibile: imposta i parametri di run, lancia le simulazioni di
 # confronto e salva gli output grafici.
 
-print("\n" + "=" * 80)
-print("SIMULAZIONE STACKELBERG (Governo vs Cittadini)")
-print("=" * 80)
+def main():
+    print("\n" + "=" * 80)
+    print("SIMULAZIONE STACKELBERG (Governo vs Cittadini)")
+    print("=" * 80)
 
-a_logaritmica_calibrata = a_logaritmica_default
-lambda_rischio_logaritmica_calibrata = lambda_rischio_logaritmica_default
-rho_rischio_logaritmica_calibrato = rho_rischio_logaritmica_default
+    risultati_confronto = esegui_confronto_quadratica_vs_logaritmica()
+    genera_grafici_confronto(risultati_confronto)
 
-print("\n" + "=" * 80)
-print("CONFRONTO FINALE IN SINGOLA RUN: QUADRATICA VS LOGARITMICA")
-print("=" * 80)
+    if mostra_grafici_default:
+        plt.show()
+    else:
+        plt.close('all')
 
-S_quad, I_quad, R_quad, c_quad, x_bar_quad, x_star_quad, p_quad, log_quad = simula_sir_stackelberg_con_controllo_periodico(
-    S_t0, I_t0, R_t0, N, beta, gamma, T,
-    costo_infetto_giornaliero, k_saturazione_ospedali, alpha_saturazione_ospedali,
-    c_iniziale=c_iniziale_default, intervallo_controllo=intervallo_controllo_default,
-    orizzonte_predizione=orizzonte_predizione_default,
-    c_min=c_min_default, c_max=c_max_default,
-    soglia_attivazione_controllo=soglia_attivazione_controllo_default, fattore_isteresi=fattore_isteresi_default,
-    lambda_reg_controllo=lambda_reg_controllo,
-    kappa_prescrizione=kappa_prescrizione, rho_rischio=rho_rischio,
-    eta_compliance=eta_compliance,
-    tipo_best_response="quadratica",
-    verbose_progress=verbose_progress_default,
-)
 
-S_log, I_log, R_log, c_log, x_bar_log, x_star_log, p_log, log_log = simula_sir_stackelberg_con_controllo_periodico(
-    S_t0, I_t0, R_t0, N, beta, gamma, T,
-    costo_infetto_giornaliero, k_saturazione_ospedali, alpha_saturazione_ospedali,
-    c_iniziale=c_iniziale_default,
-    intervallo_controllo=intervallo_controllo_default, orizzonte_predizione=orizzonte_predizione_default,
-    c_min=c_min_default, c_max=c_max_default,
-    soglia_attivazione_controllo=soglia_attivazione_controllo_default, fattore_isteresi=fattore_isteresi_default,
-    lambda_reg_controllo=lambda_reg_controllo, kappa_prescrizione=kappa_prescrizione,
-    rho_rischio=rho_rischio_logaritmica_default,
-    eta_compliance=eta_compliance,
-    a_logaritmica=a_logaritmica_default, epsilon_logaritmica=epsilon_logaritmica_default,
-    lambda_rischio_logaritmica=lambda_rischio_logaritmica_default,
-    num_grid_logaritmica=num_grid_logaritmica_default,
-    tipo_best_response="logaritmica",
-    verbose_progress=False,
-)
+def esegui_confronto_quadratica_vs_logaritmica():
+    """
+    Esegue le due simulazioni, calcola metriche comparative e stampa il report.
+    """
+    a_logaritmica_calibrata = a_logaritmica_default
+    lambda_rischio_logaritmica_calibrata = lambda_rischio_logaritmica_default
+    rho_rischio_logaritmica_calibrato = rho_rischio_logaritmica_default
 
-t_picco_quad = int(I_quad.argmax())
-t_picco_log = int(I_log.argmax())
-picco_quad = float(I_quad.max())
-picco_log = float(I_log.max())
+    print("\n" + "=" * 80)
+    print("CONFRONTO FINALE IN SINGOLA RUN: QUADRATICA VS LOGARITMICA")
+    print("=" * 80)
 
-costo_tot_quad = calcola_costo_epidemiologico_cumulato_con_controllo_variabile(
-    S_quad, I_quad, costo_infetto_giornaliero, c_quad, k_saturazione_ospedali,
-    alpha_saturazione_ospedali, 0, T, lambda_reg_controllo,
-)
-costo_tot_log = calcola_costo_epidemiologico_cumulato_con_controllo_variabile(
-    S_log, I_log, costo_infetto_giornaliero, c_log, k_saturazione_ospedali,
-    alpha_saturazione_ospedali, 0, T, lambda_reg_controllo,
-)
+    (
+        S_quadratica,
+        I_quadratica,
+        R_quadratica,
+        H_quadratica,
+        c_quadratica,
+        x_bar_quadratica,
+        x_star_quadratica,
+        p_quadratica,
+        log_ottimizzazioni_quadratica,
+    ) = simula_sir_stackelberg_con_controllo_periodico(
+        S_t0, I_t0, R_t0, N, beta, gamma, T,
+        costo_infetto_giornaliero, k_saturazione_ospedali, alpha_saturazione_ospedali,
+        c_iniziale=c_iniziale_default, intervallo_controllo=intervallo_controllo_default,
+        orizzonte_predizione=orizzonte_predizione_default,
+        c_min=c_min_default, c_max=c_max_default,
+        soglia_attivazione_controllo=soglia_attivazione_controllo_default, fattore_isteresi=fattore_isteresi_default,
+        lambda_reg_controllo=lambda_reg_controllo,
+        kappa_prescrizione=kappa_prescrizione, rho_rischio=rho_rischio,
+        eta_compliance=eta_compliance,
+        tipo_best_response="quadratica",
+        verbose_progress=verbose_progress_default,
+    )
 
-compliance_media_quad = np.mean([x_star_quad[i] / max(x_bar_quad[i], 0.01) for i in range(len(x_star_quad))]) if T > 0 else np.nan
-compliance_media_log = np.mean([x_star_log[i] / max(x_bar_log[i], 0.01) for i in range(len(x_star_log))]) if T > 0 else np.nan
-gap_medio_quad = float(np.mean(x_star_quad - x_bar_quad))
-gap_medio_log = float(np.mean(x_star_log - x_bar_log))
-H_quad = ricostruisci_comparto_ospedalizzati_da_suscettibili(
-    S_quad,
-    h_ospedalizzazione=h_ospedalizzazione_default,
-    tau_ospedalizzazione=tau_ospedalizzazione_default,
-    gamma_ospedaliera=gamma_ospedaliera_default,
-    H_t0=H_t0_default,
-)
-H_log = ricostruisci_comparto_ospedalizzati_da_suscettibili(
-    S_log,
-    h_ospedalizzazione=h_ospedalizzazione_default,
-    tau_ospedalizzazione=tau_ospedalizzazione_default,
-    gamma_ospedaliera=gamma_ospedaliera_default,
-    H_t0=H_t0_default,
-)
-t_picco_H_quad = int(np.argmax(H_quad))
-t_picco_H_log = int(np.argmax(H_log))
-picco_H_quad = float(np.max(H_quad))
-picco_H_log = float(np.max(H_log))
+    (
+        S_logaritmica,
+        I_logaritmica,
+        R_logaritmica,
+        H_logaritmica,
+        c_logaritmica,
+        x_bar_logaritmica,
+        x_star_logaritmica,
+        p_logaritmica,
+        log_ottimizzazioni_logaritmica,
+    ) = simula_sir_stackelberg_con_controllo_periodico(
+        S_t0, I_t0, R_t0, N, beta, gamma, T,
+        costo_infetto_giornaliero, k_saturazione_ospedali, alpha_saturazione_ospedali,
+        c_iniziale=c_iniziale_default,
+        intervallo_controllo=intervallo_controllo_default, orizzonte_predizione=orizzonte_predizione_default,
+        c_min=c_min_default, c_max=c_max_default,
+        soglia_attivazione_controllo=soglia_attivazione_controllo_default, fattore_isteresi=fattore_isteresi_default,
+        lambda_reg_controllo=lambda_reg_controllo, kappa_prescrizione=kappa_prescrizione,
+        rho_rischio=rho_rischio_logaritmica_default,
+        eta_compliance=eta_compliance,
+        a_logaritmica=a_logaritmica_default, epsilon_logaritmica=epsilon_logaritmica_default,
+        lambda_rischio_logaritmica=lambda_rischio_logaritmica_default,
+        num_grid_logaritmica=num_grid_logaritmica_default,
+        tipo_best_response="logaritmica",
+        verbose_progress=verbose_progress_default,
+    )
 
-print("\nParametri utility logaritmica usati (default correnti):")
-print(
-    f"  a_logaritmica={a_logaritmica_calibrata:.3f}, "
-    f"lambda_rischio_logaritmica={lambda_rischio_logaritmica_calibrata:.3f}, "
-    f"rho_rischio={rho_rischio_logaritmica_calibrato:.3f}"
-)
+    giorno_picco_quadratica = int(I_quadratica.argmax())
+    giorno_picco_logaritmica = int(I_logaritmica.argmax())
+    picco_infetti_quadratica = float(I_quadratica.max())
+    picco_infetti_logaritmica = float(I_logaritmica.max())
 
-print("\nRisultati - Utility quadratica:")
-print(f"  Picco infetti: {picco_quad:.0f} (giorno {t_picco_quad})")
-print(f"  Picco ospedalizzati H: {picco_H_quad:.0f} (giorno {t_picco_H_quad})")
-print(f"  Costo totale epidemico: {costo_tot_quad:,.2f}")
-print(f"  Complianza media (x*/x_bar): {compliance_media_quad:.3f}")
-print(f"  Gap medio (x* - x_bar): {gap_medio_quad:.4f}")
+    costo_totale_quadratica = calcola_costo_epidemiologico_cumulato_con_controllo_variabile(
+        S_quadratica, I_quadratica, H_quadratica, costo_infetto_giornaliero, c_quadratica, k_saturazione_ospedali,
+        alpha_saturazione_ospedali, 0, T, lambda_reg_controllo,
+    )
+    costo_totale_logaritmica = calcola_costo_epidemiologico_cumulato_con_controllo_variabile(
+        S_logaritmica, I_logaritmica, H_logaritmica, costo_infetto_giornaliero, c_logaritmica, k_saturazione_ospedali,
+        alpha_saturazione_ospedali, 0, T, lambda_reg_controllo,
+    )
 
-print("\nRisultati - Utility logaritmica:")
-print(f"  Picco infetti: {picco_log:.0f} (giorno {t_picco_log})")
-print(f"  Picco ospedalizzati H: {picco_H_log:.0f} (giorno {t_picco_H_log})")
-print(f"  Costo totale epidemico: {costo_tot_log:,.2f}")
-print(f"  Complianza media (x*/x_bar): {compliance_media_log:.3f}")
-print(f"  Gap medio (x* - x_bar): {gap_medio_log:.4f}")
+    compliance_media_quadratica = np.mean([
+        x_star_quadratica[i] / max(x_bar_quadratica[i], 0.01)
+        for i in range(len(x_star_quadratica))
+    ]) if T > 0 else np.nan
+    compliance_media_logaritmica = np.mean([
+        x_star_logaritmica[i] / max(x_bar_logaritmica[i], 0.01)
+        for i in range(len(x_star_logaritmica))
+    ]) if T > 0 else np.nan
+    gap_medio_quadratica = float(np.mean(x_star_quadratica - x_bar_quadratica))
+    gap_medio_logaritmica = float(np.mean(x_star_logaritmica - x_bar_logaritmica))
+    giorno_picco_ospedalizzati_quadratica = int(np.argmax(H_quadratica))
+    giorno_picco_ospedalizzati_logaritmica = int(np.argmax(H_logaritmica))
+    picco_ospedalizzati_quadratica = float(np.max(H_quadratica))
+    picco_ospedalizzati_logaritmica = float(np.max(H_logaritmica))
 
-print("\nDelta logaritmica - quadratica:")
-print(f"  Delta picco infetti: {picco_log - picco_quad:+.0f}")
-print(f"  Delta costo totale: {costo_tot_log - costo_tot_quad:+,.2f}")
-print(f"  Delta complianza media: {compliance_media_log - compliance_media_quad:+.3f}")
+    print("\nParametri utility logaritmica usati (default correnti):")
+    print(
+        f"  a_logaritmica={a_logaritmica_calibrata:.3f}, "
+        f"lambda_rischio_logaritmica={lambda_rischio_logaritmica_calibrata:.3f}, "
+        f"rho_rischio={rho_rischio_logaritmica_calibrato:.3f}"
+    )
 
-if verbose_progress_default:
-    print(f"\nNumero ottimizzazioni MPC quadratica: {len(log_quad)}")
-    print(f"Numero ottimizzazioni MPC logaritmica: {len(log_log)}")
+    print("\nRisultati - Utility quadratica:")
+    print(f"  Picco infetti: {picco_infetti_quadratica:.0f} (giorno {giorno_picco_quadratica})")
+    print(f"  Picco ospedalizzati H: {picco_ospedalizzati_quadratica:.0f} (giorno {giorno_picco_ospedalizzati_quadratica})")
+    print(f"  Costo totale epidemico: {costo_totale_quadratica:,.2f}")
+    print(f"  Complianza media (x*/x_bar): {compliance_media_quadratica:.3f}")
+    print(f"  Gap medio (x* - x_bar): {gap_medio_quadratica:.4f}")
 
-plot_dinamica_compartimenti_stackelberg(
-    t, S_quad, I_quad, R_quad, N, beta, gamma, R0, t_picco_quad,
-    H=H_quad,
-    simulation_label="quadratica",
-    output_path="sir_compartimenti_stackelberg_quadratica.png",
-)
-plot_controllo_e_comportamento_stackelberg(
-    t, S_quad, I_quad, c_quad, x_bar_quad, x_star_quad, p_quad,
-    H=H_quad,
-    simulation_label="quadratica",
-    output_path="sir_stackelberg_analisi_quadratica.png",
-)
+    print("\nRisultati - Utility logaritmica:")
+    print(f"  Picco infetti: {picco_infetti_logaritmica:.0f} (giorno {giorno_picco_logaritmica})")
+    print(f"  Picco ospedalizzati H: {picco_ospedalizzati_logaritmica:.0f} (giorno {giorno_picco_ospedalizzati_logaritmica})")
+    print(f"  Costo totale epidemico: {costo_totale_logaritmica:,.2f}")
+    print(f"  Complianza media (x*/x_bar): {compliance_media_logaritmica:.3f}")
+    print(f"  Gap medio (x* - x_bar): {gap_medio_logaritmica:.4f}")
 
-plot_dinamica_compartimenti_stackelberg(
-    t, S_log, I_log, R_log, N, beta, gamma, R0, t_picco_log,
-    H=H_log,
-    simulation_label="logaritmica",
-    output_path="sir_compartimenti_stackelberg_logaritmica.png",
-)
-plot_controllo_e_comportamento_stackelberg(
-    t, S_log, I_log, c_log, x_bar_log, x_star_log, p_log,
-    H=H_log,
-    simulation_label="logaritmica",
-    output_path="sir_stackelberg_analisi_logaritmica.png",
-)
+    print("\nDelta logaritmica - quadratica:")
+    print(f"  Delta picco infetti: {picco_infetti_logaritmica - picco_infetti_quadratica:+.0f}")
+    print(f"  Delta costo totale: {costo_totale_logaritmica - costo_totale_quadratica:+,.2f}")
+    print(f"  Delta complianza media: {compliance_media_logaritmica - compliance_media_quadratica:+.3f}")
 
-if mostra_grafici_default:
-    plt.show()
-else:
-    plt.close('all')
+    if verbose_progress_default:
+        print(f"\nNumero ottimizzazioni MPC quadratica: {len(log_ottimizzazioni_quadratica)}")
+        print(f"Numero ottimizzazioni MPC logaritmica: {len(log_ottimizzazioni_logaritmica)}")
+
+    return {
+        "quadratica": {
+            "S": S_quadratica,
+            "I": I_quadratica,
+            "R": R_quadratica,
+            "H": H_quadratica,
+            "c": c_quadratica,
+            "x_bar": x_bar_quadratica,
+            "x_star": x_star_quadratica,
+            "p": p_quadratica,
+            "giorno_picco": giorno_picco_quadratica,
+        },
+        "logaritmica": {
+            "S": S_logaritmica,
+            "I": I_logaritmica,
+            "R": R_logaritmica,
+            "H": H_logaritmica,
+            "c": c_logaritmica,
+            "x_bar": x_bar_logaritmica,
+            "x_star": x_star_logaritmica,
+            "p": p_logaritmica,
+            "giorno_picco": giorno_picco_logaritmica,
+        },
+    }
+
+
+def genera_grafici_confronto(risultati_confronto):
+    """
+    Genera i grafici usando i risultati gia' calcolati nel confronto.
+    """
+    quadratica = risultati_confronto["quadratica"]
+    logaritmica = risultati_confronto["logaritmica"]
+
+    plot_dinamica_compartimenti_stackelberg(
+        t, quadratica["S"], quadratica["I"], quadratica["R"], N, beta, gamma, R0, quadratica["giorno_picco"],
+        H=quadratica["H"],
+        simulation_label="quadratica",
+        output_path="sir_compartimenti_stackelberg_quadratica.png",
+    )
+    plot_controllo_e_comportamento_stackelberg(
+        t, quadratica["S"], quadratica["I"], quadratica["c"], quadratica["x_bar"], quadratica["x_star"], quadratica["p"],
+        H=quadratica["H"],
+        simulation_label="quadratica",
+        output_path="sir_stackelberg_analisi_quadratica.png",
+    )
+
+    plot_dinamica_compartimenti_stackelberg(
+        t, logaritmica["S"], logaritmica["I"], logaritmica["R"], N, beta, gamma, R0, logaritmica["giorno_picco"],
+        H=logaritmica["H"],
+        simulation_label="logaritmica",
+        output_path="sir_compartimenti_stackelberg_logaritmica.png",
+    )
+    plot_controllo_e_comportamento_stackelberg(
+        t, logaritmica["S"], logaritmica["I"], logaritmica["c"], logaritmica["x_bar"], logaritmica["x_star"], logaritmica["p"],
+        H=logaritmica["H"],
+        simulation_label="logaritmica",
+        output_path="sir_stackelberg_analisi_logaritmica.png",
+    )
+
+
+if __name__ == "__main__":
+    main()
 
 

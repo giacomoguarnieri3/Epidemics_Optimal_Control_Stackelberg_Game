@@ -4,409 +4,205 @@ DESCRIZIONE DETTAGLIATA - deterministic_stackelberg.py
 STATO ATTUALE DEL CODICE
 ========================
 
-Il file implementa un modello SIR deterministico con struttura Stackelberg:
-- Leader: Governo, che sceglie una intensita di controllo c_s.
-- Follower: Cittadini, che scelgono socialita x_t^* in risposta a prescrizione e rischio.
-- Dinamica: SIR discreta estesa con compartimento ospedalizzati H, con contagio modulato dalla socialita scelta.
+Il file implementa un modello SIR deterministico con Stackelberg game:
+- leader: governo, che sceglie il controllo c_s;
+- follower: cittadini, che scelgono la socialita x* in base a prescrizione e rischio;
+- dinamica epidemiologica: compartimenti S, I, H, R con ospedalizzazione ritardata.
 
-Stato operativo attuale (main):
-- In una singola run vengono eseguite SOLO due simulazioni complete:
-  1) utility cittadino quadratica
-  2) utility cittadino logaritmica
-- Il codice stampa risultati di entrambe e i delta di confronto.
-- Produce quattro grafici PNG (2 per quadratica, 2 per logaritmica) e mostra le figure.
-- Le funzioni di scansione/calibrazione restano nel file ma NON sono chiamate nel flusso principale.
+La versione corrente esegue nella run principale:
+1) simulazione con best response quadratica
+2) simulazione con best response logaritmica
+3) confronto finale tra i due esiti
+4) salvataggio di 4 grafici PNG
 
-Organizzazione attuale del file (riordino leggibilita):
-- 1) Import librerie
-- 2) Parametri del modello
-- 3) Layer follower: comportamento cittadini
-  - 3A) Mappatura policy/prescrizione + utility
-  - 3B) Best response per specifica di utility
-  - 3C) Utility numeriche di supporto
-- 4) Funzioni di costo epidemiologico
-- 5) Dinamica Stackelberg e ottimizzazione del leader
-  - 5A) Simulazione/costo su finestra
-  - 5B) Simulazione completa MPC
-- 6) Analisi output
-  - 6A) Visualizzazione
-  - 6B) Scansioni e calibrazioni parametriche
-- 7) Script di esecuzione (entrypoint)
-
-Regola di ordinamento adottata nei sottogruppi:
-- Prima funzioni helper (mattoni di supporto/riuso)
-- Poi funzioni API (funzioni di ingresso usate per orchestrare simulazioni/analisi)
+Le funzioni di scansione e calibrazione sono presenti nel file ma NON vengono
+eseguite automaticamente nel flusso principale.
 
 
-MODELLO TEORICO
-===============
+MODELLO (FORME USATE NEL CODICE)
+================================
 
-1) Struttura Stackelberg
-------------------------
-A ogni periodo:
-1. Il governo sceglie c_s (o mantiene quello corrente nel periodo MPC).
-2. c_s viene tradotto in prescrizione sociale x_bar(c_s).
-3. I cittadini osservano x_bar e il rischio p_t, poi scelgono x_t^*.
-4. La dinamica SIR evolve usando x_t^* nel termine di contagio.
+1) Prescrizione sociale dal controllo del governo
+-------------------------------------------------
+x_bar(c_s) = 1 / (1 + kappa * c_s)   [tipo default: logistica]
 
-Il governo ottimizza anticipando la best response dei cittadini.
-
-2) Mappa policy -> prescrizione
---------------------------------
-Nel caso usato in simulazione:
-
-x_bar(c_s) = 1 / (1 + kappa * c_s)
-
-Proprieta:
-- x_bar in [0,1]
-- c_s piu alto -> x_bar piu basso (prescrizione piu restrittiva)
-
-3) Rischio percepito
+2) Rischio percepito
 --------------------
+p_t = clip(rho_rischio * (I_t + H_t) / N, 0, 1)
 
-p_t = clip(rho_rischio * I_t / N, 0, 1)
+Nella simulazione giornaliera si usa I_t + H_t per il rischio percepito.
 
-Quindi il rischio cresce con la quota di infetti.
-
-Nota implementativa: nella simulazione principale il rischio percepito viene calcolato su I_t + H_t
-(infetti attivi + ospedalizzati), sempre con clipping in [0,1].
-
-4) Utility del cittadino e best response
-----------------------------------------
-
-4.1 Utility quadratica (best response chiusa)
-U_q(x) = - lambda*p_t*x - (eta/2)*(x - x_bar)^2
-
-Best response (nel codice con lambda=1 per default):
-x_t^* = clip(x_bar - (lambda*p_t)/eta, 0, 1)
-
-4.2 Utility logaritmica pura
-U_l(x) = a*log(x/x_bar + epsilon) - lambda*p_t*x
-
-Best response calcolata numericamente su griglia in [0,1].
-
-5) Dinamica epidemiologica
+3) Best response cittadini
 --------------------------
-Con fattore di contatto f(x)=x^potenza (in simulazione potenza=1):
+3.1 Quadratica (chiusa)
+x*_t = clip(x_bar - (lambda_rischio * p_t) / eta_compliance, 0, 1)
 
-new_infections_t = f(x_t^*) * beta * S_t * I_t / N
-new_recoveries_non_h_t = gamma * I_t
-new_hospitalizations_t = h * new_infections_{t-tau}   (dopo il ritardo tau)
-new_recoveries_h_t = gamma_h * H_t
+3.2 Logaritmica (numerica su griglia)
+U(x) = a * log(x / x_bar + epsilon) - lambda_rischio * p_t * x
 
+4) Fattore di contatto sociale
+------------------------------
+new_infections_t = f(x*_t) * beta * S_t * I_t / N
+f(x) = x^potenza, con default potenza = 1.0
+
+5) Compartimenti
+----------------
 S_{t+1} = S_t - new_infections_t
-I_{t+1} = I_t + new_infections_t - new_hospitalizations_t - new_recoveries_non_h_t
-H_{t+1} = H_t + new_hospitalizations_t - new_recoveries_h_t
-R_{t+1} = R_t + new_recoveries_non_h_t + new_recoveries_h_t
+I_{t+1} = I_t + new_infections_t - new_hospitalizations_t - gamma * I_t
+H_{t+1} = H_t + new_hospitalizations_t - gamma_h * H_t
+R_{t+1} = R_t + gamma * I_t + gamma_h * H_t
+
+con:
+- new_hospitalizations_t = h * new_infections_{t-tau} (dopo ritardo tau)
+- gamma_h = 1 / degenza_media_ospedaliera
 
 6) Costo del governo su finestra MPC
 ------------------------------------
+J(c_s) = J_epidemico + J_controllo
 
-J(c_s) = J_epidemico(c_s) + J_controllo(c_s)
+J_epidemico:
+somma nel tempo di
+C_t = c_i * I_t + k * (exp(alpha * (H_t / capacita_ospedaliera)) - 1)
 
-Dove:
-- J_epidemico: somma dei costi istantanei previsti sulla finestra
-- J_controllo = lambda_reg_controllo * c_s^2 * (orizzonte+1)
-
-Costo istantaneo:
-C_t = c_i*I_t + k*(exp(alpha*rapporto_occupazione_t)-1)
-
-dove rapporto_occupazione_t = pressione_ospedaliera_t / capacita_ospedaliera_infetti,
-con pressione_ospedaliera_t = H_t se disponibile, altrimenti I_t.
-
-Nel modello attuale il controllo entra soprattutto:
-- indirettamente (modificando I_t tramite comportamento)
-- direttamente con la penalita quadratica su c_s.
+J_controllo:
+lambda_reg_controllo * c_s^2 * (orizzonte + 1)
 
 
-PARAMETRI DEL MODELLO (SIGNIFICATO, SETTING, MOTIVAZIONE)
-==========================================================
+PARAMETRI DEFAULT CORRENTI (PRINCIPALI)
+========================================
 
-A) Parametri epidemiologici
----------------------------
+Epidemiologia:
 - N = 10000
-  Popolazione totale. Scala del sistema.
-- I_t0 = 10, R_t0 = 0, S_t0 = N-I_t0-R_t0
-  Condizioni iniziali epidemiche.
+- I_t0 = 10, R_t0 = 0, S_t0 = N - I_t0 - R_t0
 - beta = 0.3
-  Tasso trasmissione base.
 - gamma = 0.05
-  Tasso guarigione.
 - T = 1000
-  Durata totale della simulazione.
-- t = np.arange(0, T + 1)
-  Griglia temporale usata per output e plotting.
-- R0 = beta/gamma = 6.0
-  Numero riproduttivo base implicito.
+- R0 = beta / gamma = 6.0
 
-B) Parametri costo sanitario/policy
------------------------------------
+Costo sanitario:
 - costo_infetto_giornaliero = 10.0
-  Peso lineare degli infetti nel costo.
-- k_saturazione_ospedali = 10.0
-  Scala del termine non lineare di saturazione ospedaliera.
-- alpha_saturazione_ospedali = 0.01
-  Pendenza esponenziale della saturazione.
-- capacita_ospedaliera_infetti = 250.0
-  Soglia di capacita per overload.
-- m_controllo = 2.0
-  Parametro legacy del vecchio modello, mantenuto per retro-compatibilita ma non centrale nel flusso Stackelberg corrente.
-- lambda_reg_controllo = 14.0
-  Penalizzazione quadratica della policy c_s.
+- k_saturazione_ospedali = 100.0
+- alpha_saturazione_ospedali = 6
+- capacita_ospedaliera_infetti = 150.0
+- cap_argomento_exp_saturazione_default = 50.0
 
-Scelta di modellazione attuale:
-- il termine di costo proporzionale ai suscettibili e stato rimosso per mantenere il modello piu semplice;
-- il controllo iniziale nelle simulazioni e fissato al valore minimo ammesso (`c_iniziale_default = c_min_default`).
+Ospedalizzazione:
+- H_t0_default = 0.0
+- h_ospedalizzazione_default = 0.04
+- tau_ospedalizzazione_default = 9
+- degenza_media_ospedaliera_default = 9.0
+- gamma_ospedaliera_default = 1 / 9
 
-Motivazione esplicita nel codice:
-- k e alpha sono ridotti rispetto a versioni precedenti per evitare overflow numerico.
-
-C) Parametri MPC e trigger
---------------------------
+Controllo/MPC:
+- lambda_reg_controllo_default = 14.0
 - intervallo_controllo_default = 80
-  Ogni quanti giorni il governo ri-ottimizza.
 - orizzonte_predizione_default = 80
-  Lunghezza finestra predittiva per ogni ottimizzazione MPC.
 - c_min_default = 0.05
-  Controllo minimo (mai 0 pieno, ma molto basso).
 - c_max_default = 80.0
-  Controllo massimo ammissibile.
 - c_iniziale_default = c_min_default
-  Valore iniziale del controllo nelle simulazioni standard.
 - soglia_attivazione_controllo_default = 0.005
-  Attivazione controllo se I_t >= 0.5% della popolazione.
 - fattore_isteresi_default = 0.3
-  Soglia di spegnimento = 30% della soglia di attivazione.
-- verbose_progress_default = True
-  Attiva la stampa del progresso della simulazione.
-- mostra_grafici_default = True
-  Se True, le figure vengono mostrate con plt.show(); altrimenti vengono solo salvate e chiuse.
 - num_grid_points_default = 401
-  Granularita grid-search su c_s.
-- step_percent_progress_default = 5
-  Passo percentuale usato per i messaggi di avanzamento.
 
-D) Parametri di regime e assetto
---------------------------------
-- assetto_prudente_default = True
-  Se True mantiene spente le scansioni di calibrazione e usa l'assetto prudente corrente.
-- esegui_scansione_parametri_default = False
-  Flag scansione su alpha/lambda.
-- esegui_scansione_trigger_default = False
-  Flag scansione su soglia/isteresi.
-- esegui_scansione_comportamento_default = False
-  Flag scansione su kappa/eta/rho.
-- esegui_scansione_target_picco_default = False
-  Flag scansione su target di picco.
+Follower:
+- kappa_prescrizione_default = 0.05
+- rho_rischio_default = 1.5
+- eta_compliance_default = 12.0
+- lambda_rischio_quadratica_default = 1.0
 
-E) Parametri comportamentali
-----------------------------
-- kappa_prescrizione = 0.05
-  Sensibilita prescrizione rispetto a c_s.
-- target_socialita_al_massimo_controllo = 1 / (1 + kappa_prescrizione * c_max_default)
-  Socialita prescritta implicita quando il controllo e al massimo ammesso.
-- rho_rischio = 1.5
-  Intensita di percezione rischio epidemico.
-- eta_compliance = 12.0
-  Forza di allineamento alla prescrizione (utile quadratica).
-
-Nota implementativa:
-- L'esponente di contatto non e definito come parametro globale; nel codice e passato come
-  argomento a fattore_contatto_da_socialita(...) ed e usato con potenza=1.0 nelle simulazioni.
-- Il tipo di best response viene selezionato esplicitamente nelle chiamate di simulazione
-  tramite tipo_best_response="quadratica" oppure "logaritmica".
-
-Utility quadratica:
-- dipende da eta_compliance e dal rischio percepito p_t.
-- non usa piu i parametri b0 e q nella versione corrente del codice.
-
-Utility logaritmica (default correnti usati in run):
+Logaritmica:
 - a_logaritmica_default = 1.5
 - epsilon_logaritmica_default = 1e-3
 - lambda_rischio_logaritmica_default = 4.0
-- rho_rischio_logaritmica_default = rho_rischio (quindi 1.5)
+- rho_rischio_logaritmica_default = rho_rischio
 - num_grid_logaritmica_default = 101
 
-F) Parametri scansione e calibrazione (presenti ma non usati nel main)
------------------------------------------------------------------------
-Scansione alpha/lambda:
-- alpha_scan_default = [2.0, 3.0, 4.0, 5.0, 6.0]
-- lambda_scan_default = [20.0, 40.0, 80.0, 120.0]
-
-Scansione trigger/isteresi:
-- soglia_scan_default = [0.002, 0.0035, 0.005, 0.0075, 0.01]
-- isteresi_scan_default = [0.2, 0.3, 0.4, 0.5, 0.7]
-
-Scansione comportamento:
-- kappa_scan_default = [0.04, 0.05, 0.06]
-- eta_scan_default = [10.0, 12.0, 14.0]
-- rho_scan_default = [1.0, 1.5, 2.0]
-
-Scansione target picco:
-- target_picco_percent_default = 10.0
-- tolleranza_target_percent_default = 1.0
-- lambda_target_scan_default = [20.0, 40.0, 60.0, 80.0, 120.0, 160.0, 220.0, 300.0]
-- c_max_target_scan_default = [20.0, 30.0, 40.0, 50.0, 65.0, 80.0]
-
-Raffinamento target a due stadi:
-- top_k_stage1_default = 3
-- fattori_raffinamento_lambda_default = [0.7, 0.85, 1.0, 1.15, 1.35]
-- fattori_raffinamento_cmax_default = [0.75, 0.9, 1.0, 1.1, 1.25]
-
-Calibrazione logaritmica coarse -> refine:
-- T_scan_calibrazione_logaritmica_default = 240
-- a_logaritmica_range_plausibile_default = (0.8, 2.4)
-- lambda_rischio_logaritmica_range_plausibile_default = (0.6, 2.0)
-- rho_rischio_range_plausibile_default = (0.8, 2.2)
-- calibrazione_logaritmica_num_punti_coarse_default = 6
-- calibrazione_logaritmica_num_punti_refine_default = 5
-- calibrazione_logaritmica_top_k_stage1_default = 4
-- calibrazione_logaritmica_frazione_refine_default = 0.2
-
-Nel flusso principale attuale questi parametri non vengono invocati automaticamente, ma restano disponibili per benchmark, sensitivity analysis e calibrazione.
+Assetto operativo:
+- profilo_prudente = "prudente"
+- profilo_target_driven = "target-driven"
+- profilo_esecuzione_default = profilo_prudente
+- le flag esegui_scansione_* sono determinate da configura_flag_scansioni(profilo_esecuzione_default)
+   (nel default prudente: parametri=False, trigger=False, comportamento=False, target_picco=False)
 
 
-DESCRIZIONE DELLE FUNZIONI PER GRUPPI (HELPER -> API)
-======================================================
+FUNZIONI DEFINITE NEL FILE
+==========================
 
-3) Layer follower: comportamento cittadini
------------------------------------------
-3A) Mappatura policy/prescrizione + utility
-- Helper:
-  - utilita_cittadino_logaritmica(...)
-    Ruolo: payoff follower in forma logaritmica pura.
-- API:
-  - socialita_prescritta_da_governo(c_s, kappa, tipo="logistica")
-    Ruolo: trasforma la policy economica c_s in prescrizione sociale x_bar.
-  - rischio_percepito(I_t, N, rho_rischio=1.0)
-    Ruolo: trasforma lo stato epidemico in rischio percepito p_t.
+Layer follower:
+- utilita_cittadino_logaritmica
+- socialita_prescritta_da_governo
+- rischio_percepito
+- best_response_cittadino_quadratica
+- best_response_cittadino_logaritmica
+- fattore_contatto_da_socialita
 
-3B) Best response dei cittadini
-- API:
-  - best_response_cittadino_quadratica(...)
-    Ruolo: best response in forma chiusa (con clipping in [0,1]).
-  - best_response_cittadino_logaritmica(...)
-    Ruolo: best response numerica per utility logaritmica pura.
+Supporto numerico:
+- configura_flag_scansioni
+- stampa_progresso_simulazione
+- somma_sicura
+- overload_ospedaliero
+- costruisci_griglia_controllo
 
-3C) Utility numeriche di supporto
-- Helper:
-  - fattore_contatto_da_socialita(x_t, potenza=1.0)
-    Ruolo: converte socialita in moltiplicatore del contagio.
-  - stampa_progresso_simulazione(...)
-    Ruolo: monitoraggio avanzamento simulazione.
-  - somma_sicura(valori)
-    Ruolo: somma con saturazione numerica.
-  - overload_ospedaliero(H_t, capacita_ospedaliera)
-    Ruolo: overload ospedaliero normalizzato.
-  - ricostruisci_comparto_ospedalizzati_da_suscettibili(...)
-    Ruolo: ricostruisce H_t da S_t con ritardo ricoveri e uscite ospedaliere.
-  - costruisci_griglia_controllo(c_min, c_max, num_punti)
-    Ruolo: griglia lineare/geometrica per grid search su c_s.
+Costi epidemiologici:
+- calcola_costo_epidemiologico_istantaneo
+- calcola_costo_epidemiologico_cumulato
+- calcola_traiettoria_costo_epidemiologico_istantaneo
+- calcola_costo_epidemiologico_cumulato_con_controllo_variabile
 
-4) Funzioni di costo epidemiologico
------------------------------------
-- API:
-  - calcola_costo_epidemiologico_istantaneo(...)
-    Ruolo: costo epidemiologico giornaliero.
-  - calcola_costo_epidemiologico_cumulato(...)
-    Ruolo: aggregazione costi su intervallo temporale.
-  - calcola_traiettoria_costo_epidemiologico_istantaneo(...)
-    Ruolo: traiettoria del costo istantaneo giorno per giorno.
-  - calcola_costo_epidemiologico_cumulato_con_controllo_variabile(...)
-    Ruolo: costo cumulato con schedule di controllo variabile.
+Core Stackelberg:
+- simula_finestra_predizione_stackelberg
+- costo_previsto_su_finestra_stackelberg
+- ottimizza_c_s_su_finestra_stackelberg
+- simula_sir_stackelberg_con_controllo_periodico
 
-5) Dinamica Stackelberg e ottimizzazione leader
------------------------------------------------
-5A) Simulazione/costo su finestra
-- API:
-  - simula_finestra_predizione_stackelberg(...)
-    Ruolo: simula traiettoria predetta a c_s costante.
-  - costo_previsto_su_finestra_stackelberg(...)
-    Ruolo: costruisce J(c_s) su finestra MPC.
-  - ottimizza_c_s_su_finestra_stackelberg(...)
-    Ruolo: minimizza J(c_s) con grid search.
-
-5B) Simulazione completa MPC
-- API:
-  - simula_sir_stackelberg_con_controllo_periodico(...)
-    Ruolo: simulatore end-to-end con trigger, isteresi e riottimizzazione periodica.
-
-6) Analisi output
------------------
-6A) Visualizzazione
-- API:
-  - plot_dinamica_compartimenti_stackelberg(...)
-    Ruolo: grafico compartimenti + incidenza.
-    Nota: la barra "nuovi infetti" usa la differenza realizzata S[t]-S[t+1], quindi e coerente
-    con la dinamica simulata (che include il moltiplicatore di socialita).
-  - plot_controllo_e_comportamento_stackelberg(...)
-    Ruolo: grafico diagnostico policy/comportamento/rischio.
-    Nota: i pannelli nel plot sono 4.
-
-6B) Scansioni e calibrazioni parametriche
-- Helper:
-  - valuta_scenario_target_picco(...)
-    Ruolo: valutazione di una singola coppia (lambda, c_max) usata dalle scansioni target.
-- API:
-  - esegui_scansione_alpha_lambda(...)
-  - esegui_scansione_trigger_isteresi(...)
-  - esegui_scansione_comportamento(...)
-  - calibra_parametri_logaritmica_min_picco_due_stadi(...)
-  - esegui_scansione_target_picco(...)
-  - esegui_scansione_target_picco_due_stadi(...)
-    Ruolo comune: analisi sensibilita, calibrazione e benchmark su target di picco; funzioni disponibili ma non invocate nel main.
+Output e analisi:
+- plot_dinamica_compartimenti_stackelberg
+- plot_controllo_e_comportamento_stackelberg
+- esegui_scansione_alpha_lambda
+- esegui_scansione_trigger_isteresi
+- esegui_scansione_comportamento
+- calibra_parametri_logaritmica_min_picco_due_stadi
+- valuta_scenario_target_picco
+- esegui_scansione_target_picco
+- esegui_scansione_target_picco_due_stadi
 
 
-COSA SUCCEDE IN UNA RUN ATTUALE (PASSO-PASSO)
-==============================================
+FLUSSO RUN PRINCIPALE (EFFETTIVO)
+=================================
 
-1) Inizializzazione
-- Import librerie.
-- Set parametri globali.
-- Calcolo R0=beta/gamma.
+Il blocco finale del file usa guardia if __name__ == "__main__" e richiama main(), che esegue:
 
-2) Definizione tipi confronto
-- Utility quadratica: usa il setting corrente di eta_compliance e rho_rischio.
-- Utility logaritmica: usa i default correnti (a, lambda_rischio, rho, epsilon).
-
-3) Simulazione 1 (quadratica)
-- Chiamata a simula_sir_stackelberg_con_controllo_periodico(..., tipo_best_response="quadratica").
-- Produce traiettorie complete e log ottimizzazioni MPC.
-
-4) Simulazione 2 (logaritmica)
-- Chiamata a simula_sir_stackelberg_con_controllo_periodico(..., tipo_best_response="logaritmica").
-- Usa i default logaritmici correnti.
-
-5) Metriche finali
-Per entrambe le simulazioni:
-- picco infetti e giorno del picco
-- picco ospedalizzati H e giorno del picco H
-- costo totale epidemico
-- compliance media x*/x_bar
-- gap medio x*-x_bar
-
-6) Confronto stampato
-- Delta logaritmica - quadratica su:
-  - picco
-  - costo totale
-  - compliance
-
-7) Grafici salvati
-- Quadratica:
-  - sir_compartimenti_stackelberg_quadratica.png
-  - sir_stackelberg_analisi_quadratica.png
-- Logaritmica:
-  - sir_compartimenti_stackelberg_logaritmica.png
-  - sir_stackelberg_analisi_logaritmica.png
-
-8) Visualizzazione
-- plt.show() apre le figure.
+1) stampa intestazione simulazione
+2) run completa quadratica con simula_sir_stackelberg_con_controllo_periodico(..., tipo_best_response="quadratica")
+3) run completa logaritmica con simula_sir_stackelberg_con_controllo_periodico(..., tipo_best_response="logaritmica")
+4) calcolo metriche:
+   - picco infetti e giorno picco
+   - picco ospedalizzati H e giorno picco H
+   - costo epidemico totale con controllo variabile
+   - compliance media x*/x_bar
+   - gap medio x* - x_bar
+5) stampa dei delta (logaritmica - quadratica)
+6) plotting e salvataggio output PNG
+7) mostra grafici se mostra_grafici_default = True
 
 
-NOTA DI COERENZA TRA CODICE E DESCRIZIONE
+OUTPUT GRAFICI SALVATI NELLA RUN CORRENTE
 ==========================================
 
-Questa descrizione riflette lo stato attuale del codice in cui:
-- la run principale fa soltanto due simulazioni e confronto,
-- le calibrazioni/scansioni restano nel file come strumenti di analisi riusabili,
-- i default logaritmici sono i valori usati nella simulazione logaritmica della run principale.
+Quadratica:
+- sir_compartimenti_stackelberg_quadratica.png
+- sir_stackelberg_analisi_quadratica.png
+
+Logaritmica:
+- sir_compartimenti_stackelberg_logaritmica.png
+- sir_stackelberg_analisi_logaritmica.png
+
+
+NOTE DI ALLINEAMENTO
+====================
+
+- Questa descrizione e allineata alla versione corrente del file.
+- Non sono elencate funzioni non presenti nel codice.
+- I valori numerici sopra riportati riflettono i default attualmente definiti.
+- Le scansioni/calibrazioni restano disponibili per analisi manuale, ma non fanno
+  parte della run principale standard.
