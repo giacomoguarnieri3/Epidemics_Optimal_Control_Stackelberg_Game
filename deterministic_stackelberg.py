@@ -150,13 +150,13 @@ MAX_LOG_FLOAT = np.log(MAX_FLOAT)
 # =============================================================================
 
 # Parametri epidemiologici (BASE)
-N        = 10_000     # Popolazione totale
+N        = 100_000     # Popolazione totale
 I_t0     = 10         # Infetti iniziali
 R_t0     = 0          # Guariti iniziali
 S_t0     = N - I_t0 - R_t0  # Suscettibili iniziali
 
 beta     = 0.3        # Tasso di trasmissione
-gamma    = 0.05       # Tasso di guarigione
+gamma    = 0.06       # Tasso di guarigione (valore vicino allo storico 0.05)
 
 # Coefficienti del costo epidemiologico giornaliero — RICALIBRAGO PER EVITARE OVERFLOW
 costo_infetto_giornaliero = 10.0  # c_i (ridotto da 1000 per evitare overflow)
@@ -170,9 +170,14 @@ cap_argomento_exp_saturazione_default = 50.0
 # Parametri del compartimento ospedalizzati H_t
 H_t0_default = 0.0
 h_ospedalizzazione_default = 0.04
-tau_ospedalizzazione_default = 9
-degenza_media_ospedaliera_default = 9.0
+tau_ospedalizzazione_default = 8
+degenza_media_ospedaliera_default = 10.0
 gamma_ospedaliera_default = 1.0 / degenza_media_ospedaliera_default
+
+# Parametri del compartimento decessi D_t (flusso da ospedalizzati H_t)
+D_t0_default = 0.0
+# Calibrazione COVID: con gamma_ospedaliera=0.1 e delta=0.017 -> CFR_H ~ 14.5%
+tasso_decesso_ospedaliero_default = 0.017
 
 # Parametro di efficacia della policy (vecchio modello, mantenuto per retro-compatibilita)
 m_controllo = 2.0
@@ -197,6 +202,10 @@ num_grid_points_default = 401
 step_percent_progress_default = 5
 potenza_contatto_default = 1.0
 lambda_reg_controllo_cumulato_default = 0.0
+
+# Parametri reinfezione (SIRS opzionale)
+considera_reinfezioni_default = True
+durata_immunita_giorni_default = 240.0
 
 # Profilo di esecuzione: mantiene naming esplicito e scalabile
 profilo_prudente = "prudente"
@@ -231,7 +240,7 @@ top_k_stage1_default = 3
 fattori_raffinamento_lambda_default = [0.7, 0.85, 1.0, 1.15, 1.35]
 fattori_raffinamento_cmax_default = [0.75, 0.9, 1.0, 1.1, 1.25]
 
-T        = 1000        # Durata della simulazione
+T        = 2000        # Durata della simulazione
 t        = np.arange(0, T + 1)
 
 # ===== NUOVI PARAMETRI PER STACKELBERG (Cittadini) =====
@@ -289,18 +298,18 @@ def utilita_cittadino_logaritmica(
     a,
     epsilon,
     lambda_rischio,
+    eta_compliance,
 ):
     """
-    Utility del cittadino (forma LOGARITMICA pura, senza termine quadratico di compliance).
+    Utility del cittadino (forma logaritmica con penalty di compliance).
 
-    U_t(x_t) = a * log(x_t/x_bar + epsilon) - lambda * p_t * x_t
+    U_t(x_t) = a * log(x_t + epsilon) - lambda * p_t * x_t - (eta / 2) * (x_t - x_bar)^2
     """
     x_t = np.clip(x_t, 0.0, 1.0)
-    x_bar = max(x_bar, 1e-8)  # Evita divisione per zero
-    # Nuova forma: a * log(x_t/x_bar + epsilon) - lambda * p_t * x_t
-    beneficio_socialita = a * np.log(x_t / x_bar + epsilon)
+    beneficio_socialita = a * np.log(x_t + epsilon)
     costo_rischio = lambda_rischio * p_t * x_t
-    return beneficio_socialita - costo_rischio
+    costo_non_conformita = 0.5 * eta_compliance * (x_t - x_bar) ** 2
+    return beneficio_socialita - costo_rischio - costo_non_conformita
 
 
 def socialita_prescritta_da_governo(c_s, kappa, tipo="logistica"):
@@ -380,10 +389,11 @@ def best_response_cittadino_logaritmica(
     a,
     epsilon,
     lambda_rischio,
+    eta_compliance,
     num_grid=num_grid_logaritmica_default,
 ):
     """
-    Best response del cittadino per utility LOGARITMICA pura (ora dipende da x_bar).
+    Best response del cittadino per utility logaritmica con compliance.
 
     Massimizza numericamente su griglia [0, 1].
     """
@@ -396,6 +406,7 @@ def best_response_cittadino_logaritmica(
             a,
             epsilon,
             lambda_rischio,
+            eta_compliance,
         )
         for x in griglia
     ])
@@ -685,8 +696,12 @@ def simula_finestra_predizione_stackelberg(
     h_ospedalizzazione=h_ospedalizzazione_default,
     tau_ospedalizzazione=tau_ospedalizzazione_default,
     gamma_ospedaliera=gamma_ospedaliera_default,
+    tasso_decesso_ospedaliero=tasso_decesso_ospedaliero_default,
     H_init=H_t0_default,
+    D_init=D_t0_default,
     tipo_best_response="quadratica",
+    considera_reinfezioni=considera_reinfezioni_default,
+    durata_immunita_giorni=durata_immunita_giorni_default,
 ):
     """
     Simula una finestra di predizione con decisione cittadino (Stackelberg).
@@ -708,16 +723,21 @@ def simula_finestra_predizione_stackelberg(
     a_logaritmica, epsilon_logaritmica, lambda_rischio_logaritmica, num_grid_logaritmica :
         parametri utility logaritmica pura
     tipo_best_response : "quadratica" oppure "logaritmica"
+    considera_reinfezioni : bool
+        Se True abilita la perdita di immunita (flusso R -> S).
+    durata_immunita_giorni : float
+        Durata media dell'immunita naturale in giorni (SIRS).
     
     Ritorna
     -------
-    S_pred, I_pred, R_pred, H_pred : traiettorie
+    S_pred, I_pred, R_pred, H_pred, D_pred : traiettorie
     x_bar_pred, x_star_pred : prescrizione e best response
     """
     S_pred = np.zeros(orizzonte + 1)
     I_pred = np.zeros(orizzonte + 1)
     R_pred = np.zeros(orizzonte + 1)
     H_pred = np.zeros(orizzonte + 1)
+    D_pred = np.zeros(orizzonte + 1)
     x_bar_pred = np.zeros(orizzonte + 1)
     x_star_pred = np.zeros(orizzonte + 1)
     nuovi_infetti_hist = np.zeros(orizzonte)
@@ -726,10 +746,16 @@ def simula_finestra_predizione_stackelberg(
     I_pred[0] = I_init
     R_pred[0] = R_init
     H_pred[0] = max(0.0, float(H_init))
+    D_pred[0] = max(0.0, float(D_init))
 
     h_eff = float(np.clip(h_ospedalizzazione, 0.0, 1.0))
     tau_eff = int(max(0, tau_ospedalizzazione))
     gamma_h_eff = float(max(0.0, gamma_ospedaliera))
+    delta_h_eff = float(np.clip(tasso_decesso_ospedaliero, 0.0, 1.0))
+    if considera_reinfezioni and durata_immunita_giorni > 0.0:
+        omega_reinfezione = 1.0 / float(durata_immunita_giorni)
+    else:
+        omega_reinfezione = 0.0
 
     x_bar = socialita_prescritta_da_governo(c_s, kappa_prescrizione, tipo="logistica")
     x_bar_pred[0] = x_bar
@@ -744,7 +770,7 @@ def simula_finestra_predizione_stackelberg(
         elif tipo_best_response == "logaritmica":
             x_star = best_response_cittadino_logaritmica(
                 x_bar, p_k, a_logaritmica, epsilon_logaritmica,
-                lambda_rischio_logaritmica, num_grid=num_grid_logaritmica,
+                lambda_rischio_logaritmica, eta_compliance, num_grid=num_grid_logaritmica,
             )
         else:
             raise ValueError(f"tipo_best_response non supportato: {tipo_best_response}")
@@ -762,16 +788,19 @@ def simula_finestra_predizione_stackelberg(
 
         new_recoveries_non_h = gamma * I_pred[k]
         new_recoveries_h = gamma_h_eff * H_pred[k]
+        new_deaths_h = delta_h_eff * H_pred[k]
+        new_waning_immunity = min(omega_reinfezione * R_pred[k], R_pred[k])
         
-        S_pred[k + 1] = S_pred[k] - new_infections
+        S_pred[k + 1] = S_pred[k] - new_infections + new_waning_immunity
         I_pred[k + 1] = max(0.0, I_pred[k] + new_infections - new_hospitalizations - new_recoveries_non_h)
-        H_pred[k + 1] = max(0.0, H_pred[k] + new_hospitalizations - new_recoveries_h)
-        R_pred[k + 1] = max(0.0, R_pred[k] + new_recoveries_non_h + new_recoveries_h)
+        H_pred[k + 1] = max(0.0, H_pred[k] + new_hospitalizations - new_recoveries_h - new_deaths_h)
+        R_pred[k + 1] = max(0.0, R_pred[k] + new_recoveries_non_h + new_recoveries_h - new_waning_immunity)
+        D_pred[k + 1] = max(0.0, D_pred[k] + new_deaths_h)
         
         x_bar_pred[k + 1] = x_bar
         x_star_pred[k + 1] = x_star
     
-    return S_pred, I_pred, R_pred, H_pred, x_bar_pred, x_star_pred
+    return S_pred, I_pred, R_pred, H_pred, D_pred, x_bar_pred, x_star_pred
 
 
 def costo_previsto_su_finestra_stackelberg(
@@ -788,10 +817,14 @@ def costo_previsto_su_finestra_stackelberg(
     h_ospedalizzazione=h_ospedalizzazione_default,
     tau_ospedalizzazione=tau_ospedalizzazione_default,
     gamma_ospedaliera=gamma_ospedaliera_default,
+    tasso_decesso_ospedaliero=tasso_decesso_ospedaliero_default,
     H_init=H_t0_default,
+    D_init=D_t0_default,
     cap_argomento_exp_saturazione=cap_argomento_exp_saturazione_default,
     lambda_reg_controllo=lambda_reg_controllo_default,
     tipo_best_response="quadratica",
+    considera_reinfezioni=considera_reinfezioni_default,
+    durata_immunita_giorni=durata_immunita_giorni_default,
 ):
     """
     Calcola il costo previsto su una finestra considerando la best response cittadino.
@@ -810,7 +843,7 @@ def costo_previsto_su_finestra_stackelberg(
 
         c_s -> x_bar(c_s) -> x_t^* -> new_infections -> I_t
     """
-    S_pred, I_pred, _, H_pred, _, _ = simula_finestra_predizione_stackelberg(
+    S_pred, I_pred, _, H_pred, _, _, _ = simula_finestra_predizione_stackelberg(
         S_init, I_init, R_init, N, beta, gamma,
         orizzonte, c_s,
         kappa_prescrizione,
@@ -820,8 +853,12 @@ def costo_previsto_su_finestra_stackelberg(
         h_ospedalizzazione,
         tau_ospedalizzazione,
         gamma_ospedaliera,
+        tasso_decesso_ospedaliero,
         H_init,
+        D_init,
         tipo_best_response,
+        considera_reinfezioni,
+        durata_immunita_giorni,
     )
     
     costo_epidemico = calcola_costo_epidemiologico_cumulato(
@@ -848,10 +885,14 @@ def ottimizza_c_s_su_finestra_stackelberg(
     h_ospedalizzazione=h_ospedalizzazione_default,
     tau_ospedalizzazione=tau_ospedalizzazione_default,
     gamma_ospedaliera=gamma_ospedaliera_default,
+    tasso_decesso_ospedaliero=tasso_decesso_ospedaliero_default,
     H_init=H_t0_default,
+    D_init=D_t0_default,
     cap_argomento_exp_saturazione=cap_argomento_exp_saturazione_default,
     lambda_reg_controllo=lambda_reg_controllo_default,
     tipo_best_response="quadratica",
+    considera_reinfezioni=considera_reinfezioni_default,
+    durata_immunita_giorni=durata_immunita_giorni_default,
 ):
     """
     Ottimizza c_s su una finestra con grid search, considerando la reazione cittadino.
@@ -871,9 +912,11 @@ def ottimizza_c_s_su_finestra_stackelberg(
         costo_infetto_giornaliero, k_saturazione_ospedali, alpha_saturazione_ospedali,
         c_iniziale_clip, kappa_prescrizione, rho_rischio,
         eta_compliance, a_logaritmica, epsilon_logaritmica, lambda_rischio_logaritmica, num_grid_logaritmica,
-        h_ospedalizzazione, tau_ospedalizzazione, gamma_ospedaliera,
-        H_init, cap_argomento_exp_saturazione, lambda_reg_controllo,
+        h_ospedalizzazione, tau_ospedalizzazione, gamma_ospedaliera, tasso_decesso_ospedaliero,
+        H_init, D_init, cap_argomento_exp_saturazione, lambda_reg_controllo,
         tipo_best_response,
+        considera_reinfezioni,
+        durata_immunita_giorni,
     )
     
     num_grid_points = num_grid_points_default
@@ -889,10 +932,14 @@ def ottimizza_c_s_su_finestra_stackelberg(
             h_ospedalizzazione,
             tau_ospedalizzazione,
             gamma_ospedaliera,
+            tasso_decesso_ospedaliero,
             H_init,
+            D_init,
             cap_argomento_exp_saturazione,
             lambda_reg_controllo,
             tipo_best_response,
+            considera_reinfezioni,
+            durata_immunita_giorni,
         )
         for c_val in griglia_c
     ])
@@ -953,9 +1000,13 @@ def simula_sir_stackelberg_con_controllo_periodico(
     h_ospedalizzazione=h_ospedalizzazione_default,
     tau_ospedalizzazione=tau_ospedalizzazione_default,
     gamma_ospedaliera=gamma_ospedaliera_default,
+    tasso_decesso_ospedaliero=tasso_decesso_ospedaliero_default,
     H_init=H_t0_default,
+    D_init=D_t0_default,
     cap_argomento_exp_saturazione=cap_argomento_exp_saturazione_default,
     tipo_best_response="quadratica",
+    considera_reinfezioni=considera_reinfezioni_default,
+    durata_immunita_giorni=durata_immunita_giorni_default,
     verbose_progress=verbose_progress_default,
 ):
     """
@@ -965,14 +1016,19 @@ def simula_sir_stackelberg_con_controllo_periodico(
     1) Governo decide c_s periodicamente (MPC).
     2) Cittadini osservano c_s e lo stato I_t, scelgono x_t^*.
     3) Dinamica evolve in base a x_t^*.
+
+    Se considera_reinfezioni=True, il modello passa a una dinamica SIRS con
+    flusso R -> S parametrizzato da durata_immunita_giorni.
     """
     S = np.zeros(T + 1)
     I = np.zeros(T + 1)
     R = np.zeros(T + 1)
     H = np.zeros(T + 1)
+    D = np.zeros(T + 1)
     nuovi_infetti_hist = np.zeros(T)
     S[0], I[0], R[0] = S_t0, I_t0, R_t0
     H[0] = max(0.0, float(H_init))
+    D[0] = max(0.0, float(D_init))
     
     c_schedule = np.zeros(T)
     x_bar_schedule = np.zeros(T)
@@ -991,6 +1047,11 @@ def simula_sir_stackelberg_con_controllo_periodico(
     h_eff = float(np.clip(h_ospedalizzazione, 0.0, 1.0))        # Efficienza ospedalizzazione, clippata per stabilità numerica.
     tau_eff = int(max(0, tau_ospedalizzazione))                 # Tempo di latenza ospedalizzazione, clippato per stabilità numerica.
     gamma_h_eff = float(max(0.0, gamma_ospedaliera))            # Tasso di guarigione ospedaliera, clippato per stabilità numerica.
+    delta_h_eff = float(np.clip(tasso_decesso_ospedaliero, 0.0, 1.0))  # Tasso decessi tra ospedalizzati.
+    if considera_reinfezioni and durata_immunita_giorni > 0.0:
+        omega_reinfezione = 1.0 / float(durata_immunita_giorni)
+    else:
+        omega_reinfezione = 0.0
 
     if tipo_best_response not in ("quadratica", "logaritmica"): 
         raise ValueError(
@@ -1026,11 +1087,13 @@ def simula_sir_stackelberg_con_controllo_periodico(
                 kappa_prescrizione, rho_rischio, eta_compliance,
                 a_logaritmica, epsilon_logaritmica, lambda_rischio_logaritmica,
                 num_grid_logaritmica,
-                h_eff, tau_eff, gamma_h_eff,
-                H[giorno],
+                h_eff, tau_eff, gamma_h_eff, delta_h_eff,
+                H[giorno], D[giorno],
                 cap_argomento_exp_saturazione,
                 lambda_reg_controllo,
                 tipo_best_response,
+                considera_reinfezioni,
+                durata_immunita_giorni,
             )
             
             c_applicato = c_ottimo
@@ -1055,7 +1118,7 @@ def simula_sir_stackelberg_con_controllo_periodico(
         else:
             x_star = best_response_cittadino_logaritmica(
                 x_bar, p_t, a_logaritmica, epsilon_logaritmica,
-                lambda_rischio_logaritmica, num_grid=num_grid_logaritmica,
+                lambda_rischio_logaritmica, eta_compliance, num_grid=num_grid_logaritmica,
             )
         # La socialita effettiva x_star influenza il numero di nuovi infetti tramite il fattore di contatto.
         fattore = fattore_contatto_da_socialita(x_star, potenza=potenza_contatto_default)
@@ -1069,11 +1132,14 @@ def simula_sir_stackelberg_con_controllo_periodico(
 
         new_recoveries_non_h = gamma * I[giorno]
         new_recoveries_h = gamma_h_eff * H[giorno]
+        new_deaths_h = delta_h_eff * H[giorno]
+        new_waning_immunity = min(omega_reinfezione * R[giorno], R[giorno])
         # Aggiorna i compartimenti S, I, H, R con i nuovi flussi, assicurandosi di non andare sotto zero.
-        S[giorno + 1] = S[giorno] - new_infections
+        S[giorno + 1] = S[giorno] - new_infections + new_waning_immunity
         I[giorno + 1] = max(0.0, I[giorno] + new_infections - new_hospitalizations - new_recoveries_non_h)
-        H[giorno + 1] = max(0.0, H[giorno] + new_hospitalizations - new_recoveries_h)
-        R[giorno + 1] = max(0.0, R[giorno] + new_recoveries_non_h + new_recoveries_h)
+        H[giorno + 1] = max(0.0, H[giorno] + new_hospitalizations - new_recoveries_h - new_deaths_h)
+        R[giorno + 1] = max(0.0, R[giorno] + new_recoveries_non_h + new_recoveries_h - new_waning_immunity)
+        D[giorno + 1] = max(0.0, D[giorno] + new_deaths_h)
         
         c_schedule[giorno] = c_applicato
         x_bar_schedule[giorno] = x_bar
@@ -1091,7 +1157,7 @@ def simula_sir_stackelberg_con_controllo_periodico(
     
     if verbose_progress:
         print("[Stackelberg MPC] simulazione completata.")
-    return S, I, R, H, c_schedule, x_bar_schedule, x_star_schedule, p_rischio_schedule, log_ottimizzazione
+    return S, I, R, H, D, c_schedule, x_bar_schedule, x_star_schedule, p_rischio_schedule, log_ottimizzazione
 
 
 # =============================================================================
@@ -1106,6 +1172,7 @@ def simula_sir_stackelberg_con_controllo_periodico(
 def plot_dinamica_compartimenti_stackelberg(
     t, S, I, R, N, beta, gamma, R0, t_picco,
     H=None,
+    D=None,
     simulation_label="quadratica",
     output_path="sir_compartimenti_stackelberg.png",
 ):
@@ -1125,6 +1192,8 @@ def plot_dinamica_compartimenti_stackelberg(
     ax1.plot(t, R / N * 100, color="forestgreen", lw=2, label="R — Rimossi/Guariti")
     if H is not None:
         ax1.plot(t, H / N * 100, color="darkorange", lw=2, label="H — Ospedalizzati")
+    if D is not None:
+        ax1.plot(t, D / N * 100, color="black", lw=2, label="D — Decessi cumulati")
     ax1.axvline(t_picco, color="crimson", lw=1.2, ls="--", alpha=0.6,
                 label=f"Picco I (giorno {t_picco})")
     ax1.set_ylabel("Frazione di popolazione (%)", fontsize=11)
@@ -1141,6 +1210,9 @@ def plot_dinamica_compartimenti_stackelberg(
     if H is not None:
         ax2_right = ax2.twinx()
         ax2_right.plot(t, H, color="darkorange", lw=1.8, alpha=0.85, label="Ospedalizzati H(t)")
+        if D is not None:
+            nuovi_decessi = np.maximum(0.0, D[1:] - D[:-1])
+            ax2_right.plot(t[:-1], nuovi_decessi, color="black", lw=1.6, alpha=0.8, ls=":", label="Nuovi decessi / giorno")
         ax2_right.set_ylabel("Ospedalizzati", fontsize=11, color="darkorange")
         ax2_right.tick_params(axis="y", labelcolor="darkorange")
         lines_left, labels_left = ax2.get_legend_handles_labels()
@@ -1250,7 +1322,7 @@ def esegui_scansione_alpha_lambda(
 
     for alpha_val in alpha_values:
         for lambda_val in lambda_values:
-            _, I_tmp, _, _, c_tmp, _, _, _, _ = simula_sir_stackelberg_con_controllo_periodico(
+            _, I_tmp, _, _, _, c_tmp, _, _, _, _ = simula_sir_stackelberg_con_controllo_periodico(
                 S_t0, I_t0, R_t0, N, beta, gamma,
                 T_scan, costo_infetto_giornaliero, k_saturazione_ospedali, alpha_val,
                 c_iniziale=c_iniziale_default,
@@ -1306,7 +1378,7 @@ def esegui_scansione_trigger_isteresi(
 
     for soglia_val in soglia_values:
         for isteresi_val in isteresi_values:
-            _, I_tmp, _, _, c_tmp, _, _, _, _ = simula_sir_stackelberg_con_controllo_periodico(
+            _, I_tmp, _, _, _, c_tmp, _, _, _, _ = simula_sir_stackelberg_con_controllo_periodico(
                 S_t0,
                 I_t0,
                 R_t0,
@@ -1376,7 +1448,7 @@ def esegui_scansione_comportamento(
     for kappa_val in kappa_values:
         for eta_val in eta_values:
             for rho_val in rho_values:
-                _, I_tmp, _, _, c_tmp, x_bar_tmp, x_star_tmp, _, _ = simula_sir_stackelberg_con_controllo_periodico(
+                _, I_tmp, _, _, _, c_tmp, x_bar_tmp, x_star_tmp, _, _ = simula_sir_stackelberg_con_controllo_periodico(
                     S_t0,
                     I_t0,
                     R_t0,
@@ -1459,7 +1531,7 @@ def calibra_parametri_logaritmica_min_picco_due_stadi(
     Criterio di selezione: minimizzare il picco massimo degli infetti.
     """
     def valuta_tripla(a_val, lambda_rischio_val, rho_val):
-        S_tmp, I_tmp, _, H_tmp, c_tmp, x_bar_tmp, x_star_tmp, _, _ = simula_sir_stackelberg_con_controllo_periodico(
+        S_tmp, I_tmp, _, H_tmp, _, c_tmp, x_bar_tmp, x_star_tmp, _, _ = simula_sir_stackelberg_con_controllo_periodico(
             S_t0,
             I_t0,
             R_t0,
@@ -1634,7 +1706,7 @@ def valuta_scenario_target_picco(
     c_min_eff = min(c_min_default, c_max_val)
     c_init_eff = float(np.clip(c_iniziale_default, c_min_eff, c_max_val))
 
-    S_tmp, I_tmp, _, H_tmp, c_tmp, _, _, _, _ = simula_sir_stackelberg_con_controllo_periodico(
+    S_tmp, I_tmp, _, H_tmp, _, c_tmp, _, _, _, _ = simula_sir_stackelberg_con_controllo_periodico(
         S_t0,
         I_t0,
         R_t0,
@@ -1715,7 +1787,7 @@ def esegui_scansione_target_picco(
             c_min_eff = min(c_min_default, c_max_val)
             c_init_eff = float(np.clip(c_iniziale_default, c_min_eff, c_max_val))
 
-            S_tmp, I_tmp, _, H_tmp, c_tmp, _, _, _, _ = simula_sir_stackelberg_con_controllo_periodico(
+            S_tmp, I_tmp, _, H_tmp, _, c_tmp, _, _, _, _ = simula_sir_stackelberg_con_controllo_periodico(
                 S_t0,
                 I_t0,
                 R_t0,
@@ -1963,6 +2035,11 @@ def main():
     print("\n" + "=" * 80)
     print("SIMULAZIONE STACKELBERG (Governo vs Cittadini)")
     print("=" * 80)
+    print(
+        "Reinfezioni abilitate: "
+        f"{considera_reinfezioni_default} | "
+        f"durata immunita media (giorni): {durata_immunita_giorni_default:.1f}"
+    )
 
     risultati_confronto = esegui_confronto_quadratica_vs_logaritmica()
     genera_grafici_confronto(risultati_confronto)
@@ -1990,6 +2067,7 @@ def esegui_confronto_quadratica_vs_logaritmica():
         I_quadratica,
         R_quadratica,
         H_quadratica,
+        D_quadratica,
         c_quadratica,
         x_bar_quadratica,
         x_star_quadratica,
@@ -2014,6 +2092,7 @@ def esegui_confronto_quadratica_vs_logaritmica():
         I_logaritmica,
         R_logaritmica,
         H_logaritmica,
+        D_logaritmica,
         c_logaritmica,
         x_bar_logaritmica,
         x_star_logaritmica,
@@ -2064,6 +2143,8 @@ def esegui_confronto_quadratica_vs_logaritmica():
     giorno_picco_ospedalizzati_logaritmica = int(np.argmax(H_logaritmica))
     picco_ospedalizzati_quadratica = float(np.max(H_quadratica))
     picco_ospedalizzati_logaritmica = float(np.max(H_logaritmica))
+    decessi_finali_quadratica = float(D_quadratica[-1])
+    decessi_finali_logaritmica = float(D_logaritmica[-1])
 
     print("\nParametri utility logaritmica usati (default correnti):")
     print(
@@ -2075,6 +2156,7 @@ def esegui_confronto_quadratica_vs_logaritmica():
     print("\nRisultati - Utility quadratica:")
     print(f"  Picco infetti: {picco_infetti_quadratica:.0f} (giorno {giorno_picco_quadratica})")
     print(f"  Picco ospedalizzati H: {picco_ospedalizzati_quadratica:.0f} (giorno {giorno_picco_ospedalizzati_quadratica})")
+    print(f"  Decessi cumulati finali D(T): {decessi_finali_quadratica:.0f}")
     print(f"  Costo totale epidemico: {costo_totale_quadratica:,.2f}")
     print(f"  Complianza media (x*/x_bar): {compliance_media_quadratica:.3f}")
     print(f"  Gap medio (x* - x_bar): {gap_medio_quadratica:.4f}")
@@ -2082,12 +2164,14 @@ def esegui_confronto_quadratica_vs_logaritmica():
     print("\nRisultati - Utility logaritmica:")
     print(f"  Picco infetti: {picco_infetti_logaritmica:.0f} (giorno {giorno_picco_logaritmica})")
     print(f"  Picco ospedalizzati H: {picco_ospedalizzati_logaritmica:.0f} (giorno {giorno_picco_ospedalizzati_logaritmica})")
+    print(f"  Decessi cumulati finali D(T): {decessi_finali_logaritmica:.0f}")
     print(f"  Costo totale epidemico: {costo_totale_logaritmica:,.2f}")
     print(f"  Complianza media (x*/x_bar): {compliance_media_logaritmica:.3f}")
     print(f"  Gap medio (x* - x_bar): {gap_medio_logaritmica:.4f}")
 
     print("\nDelta logaritmica - quadratica:")
     print(f"  Delta picco infetti: {picco_infetti_logaritmica - picco_infetti_quadratica:+.0f}")
+    print(f"  Delta decessi finali: {decessi_finali_logaritmica - decessi_finali_quadratica:+.0f}")
     print(f"  Delta costo totale: {costo_totale_logaritmica - costo_totale_quadratica:+,.2f}")
     print(f"  Delta complianza media: {compliance_media_logaritmica - compliance_media_quadratica:+.3f}")
 
@@ -2101,6 +2185,7 @@ def esegui_confronto_quadratica_vs_logaritmica():
             "I": I_quadratica,
             "R": R_quadratica,
             "H": H_quadratica,
+            "D": D_quadratica,
             "c": c_quadratica,
             "x_bar": x_bar_quadratica,
             "x_star": x_star_quadratica,
@@ -2112,6 +2197,7 @@ def esegui_confronto_quadratica_vs_logaritmica():
             "I": I_logaritmica,
             "R": R_logaritmica,
             "H": H_logaritmica,
+            "D": D_logaritmica,
             "c": c_logaritmica,
             "x_bar": x_bar_logaritmica,
             "x_star": x_star_logaritmica,
@@ -2131,6 +2217,7 @@ def genera_grafici_confronto(risultati_confronto):
     plot_dinamica_compartimenti_stackelberg(
         t, quadratica["S"], quadratica["I"], quadratica["R"], N, beta, gamma, R0, quadratica["giorno_picco"],
         H=quadratica["H"],
+        D=quadratica["D"],
         simulation_label="quadratica",
         output_path="sir_compartimenti_stackelberg_quadratica.png",
     )
@@ -2144,6 +2231,7 @@ def genera_grafici_confronto(risultati_confronto):
     plot_dinamica_compartimenti_stackelberg(
         t, logaritmica["S"], logaritmica["I"], logaritmica["R"], N, beta, gamma, R0, logaritmica["giorno_picco"],
         H=logaritmica["H"],
+        D=logaritmica["D"],
         simulation_label="logaritmica",
         output_path="sir_compartimenti_stackelberg_logaritmica.png",
     )
