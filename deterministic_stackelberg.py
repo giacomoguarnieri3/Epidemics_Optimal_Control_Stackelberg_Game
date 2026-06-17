@@ -1,5 +1,5 @@
 """
-Modello Epidemiologico SIR — Stackelberg Game (Governo vs Cittadini)
+Modello Epidemiologico SIR â€” Stackelberg Game (Governo vs Cittadini)
 ====================================================================
 
 Struttura gerarchica:
@@ -156,27 +156,27 @@ S_t0     = N - I_t0 - R_t0  # Suscettibili iniziali
 beta     = 0.3        # Tasso di trasmissione
 gamma    = 0.06       # Tasso di guarigione (valore vicino allo storico 0.05)
 
-# Coefficienti del costo epidemiologico giornaliero — RICALIBRAGO PER EVITARE OVERFLOW
+# Coefficienti del costo epidemiologico giornaliero â€” RICALIBRAGO PER EVITARE OVERFLOW
 costo_infetto_giornaliero = 10.0  # c_i (ridotto da 1000 per evitare overflow)
 
-# Parametri di saturazione ospedaliera — RICALIBRAGI PER EVITARE OVERFLOW
+# Parametri di saturazione ospedaliera â€” RICALIBRAGI PER EVITARE OVERFLOW
 k_saturazione_ospedali = 100.0  # (ridotto da 50000 per evitare overflow)
 alpha_saturazione_ospedali = 6  # (ridotto da 6.0 per evitare overflow)
 capacita_ospedaliera_infetti = 150.0
 cap_argomento_exp_saturazione_default = 50.0
 
 # Parametri del compartimento ospedalizzati H_t
-H_t0_default = 0.0
-h_ospedalizzazione_default = 0.04
-tau_ospedalizzazione_default = 8
-degenza_media_ospedaliera_default = 10.0
-gamma_ospedaliera_default = 1.0 / degenza_media_ospedaliera_default
+H_t0_default = 0.0          # Stato iniziale compartimento ospedalizzati H.
+h_default = 0.04            # Quota dei nuovi infetti che richiede ospedalizzazione (branch I -> H).
+tau_IH_default = 8          # Ritardo fisso tra nuova infezione e ingresso in H. PER COVID 7-12 GIORNI
+tau_IR_default = 13         # Ritardo fisso guarigione autonoma (branch I -> R senza H). PER COVID 10-14 GIORNI
+tau_HR_default = 10         # Ritardo fisso guarigione dopo ospedalizzazione (branch H -> R). PER COVID  POTREBBE ESSERE MAGGIORE
 
 # Parametri del compartimento decessi D_t (flusso da ospedalizzati H_t)
-D_t0_default = 0.0
-# Calibrazione COVID: con gamma_ospedaliera=0.1 e delta=0.017 -> CFR_H ~ 14.5%
-tasso_decesso_ospedaliero_default = 0.017
-tau_decesso_ospedaliero_default = 7  # Ritardo tra ospedalizzazione e decesso (giorni)
+D_t0_default = 0.0          # Stato iniziale compartimento decessi cumulati D.
+# Quota di ospedalizzati che termina nel compartimento decessi D_t
+mu_H_default = 0.017        # Quota dei nuovi ospedalizzati che va verso D (branch H -> D).
+tau_HD_default = 7          # Ritardo fisso tra ingresso in H e decesso. PER COVID IN MOLTE COORTI È PIÙ VICINO A 8-14
 
 # Parametro di efficacia della policy (vecchio modello, mantenuto per retro-compatibilita)
 m_controllo = 2.0
@@ -189,7 +189,7 @@ lambda_reg_controllo = lambda_reg_controllo_default
 intervallo_controllo_default = 80
 orizzonte_predizione_default = 80
 c_min_default = 0.05
-c_max_default = 80.0
+c_max_default = 200.0
 c_iniziale_default = c_min_default
 soglia_attivazione_controllo_default = 0.005
 fattore_isteresi_default = 0.3
@@ -202,9 +202,9 @@ step_percent_progress_default = 5
 potenza_contatto_default = 1.0
 lambda_reg_controllo_cumulato_default = 0.0
 
-# Parametri reinfezione (SIRS opzionale)
+# Parametro ritardo reinfezione (R -> S): permanenza fissa in R
 considera_reinfezioni_default = True
-durata_immunita_giorni_default = 240.0
+tau_IRS_default = 240.0     # Ritardo fisso immunita naturale: tempo tra ingresso in R e ritorno in S. PER OMICRON 90-180 GIORNI
 
 # Profilo di esecuzione: mantiene naming esplicito e scalabile
 profilo_prudente = "prudente"
@@ -654,7 +654,7 @@ def calcola_costo_epidemiologico_cumulato_con_controllo_variabile(
     if giorno_corrente >= len(S) or giorno_corrente >= len(I):
         raise ValueError("giorno_corrente eccede le traiettorie.")
     if len(c_schedule) == 0:
-        raise ValueError("c_schedule non può essere vuoto.")
+        raise ValueError("c_schedule non puÃ² essere vuoto.")
     if len(H) != len(S):
         raise ValueError("La traiettoria H deve avere la stessa lunghezza di S.")
 
@@ -695,16 +695,17 @@ def simula_finestra_predizione_stackelberg(
     epsilon_logaritmica=epsilon_logaritmica_default,
     lambda_rischio_logaritmica=lambda_rischio_logaritmica_default,
     num_grid_logaritmica=num_grid_logaritmica_default,
-    h_ospedalizzazione=h_ospedalizzazione_default,
-    tau_ospedalizzazione=tau_ospedalizzazione_default,
-    gamma_ospedaliera=gamma_ospedaliera_default,
-    tasso_decesso_ospedaliero=tasso_decesso_ospedaliero_default,
-    tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
+    h=h_default,
+    tau_IH=tau_IH_default,
+    tau_IR=tau_IR_default,
+    tau_HR=tau_HR_default,
+    mu_H=mu_H_default,
+    tau_HD=tau_HD_default,
     H_init=H_t0_default,
     D_init=D_t0_default,
     tipo_best_response="quadratica",
     considera_reinfezioni=considera_reinfezioni_default,
-    durata_immunita_giorni=durata_immunita_giorni_default,
+    tau_IRS=tau_IRS_default,
 ):
     """
     Simula una finestra di predizione con decisione cittadino (Stackelberg).
@@ -727,9 +728,9 @@ def simula_finestra_predizione_stackelberg(
         parametri utility logaritmica pura
     tipo_best_response : "quadratica" oppure "logaritmica"
     considera_reinfezioni : bool
-        Se True abilita la perdita di immunita (flusso R -> S).
-    durata_immunita_giorni : float
-        Durata media dell'immunita naturale in giorni (SIRS).
+        Se True abilita la perdita di immunita (flusso R -> S) con ritardo esplicito.
+    tau_IRS : float
+        Ritardo fisso (in giorni) tra ingresso in R e ritorno in S.
     
     Ritorna
     -------
@@ -744,7 +745,8 @@ def simula_finestra_predizione_stackelberg(
     x_bar_pred = np.zeros(orizzonte + 1)
     x_star_pred = np.zeros(orizzonte + 1)
     nuovi_infetti_hist = np.zeros(orizzonte)
-    decessi_ospedalizzati_hist = np.zeros(orizzonte)  # Traccia decessi dagli ospedalizzati per ritardo
+    nuovi_ospedalizzati_hist = np.zeros(orizzonte)
+    ingressi_in_R_hist = np.zeros(orizzonte)
     
     S_pred[0] = S_init
     I_pred[0] = I_init
@@ -752,15 +754,16 @@ def simula_finestra_predizione_stackelberg(
     H_pred[0] = max(0.0, float(H_init))
     D_pred[0] = max(0.0, float(D_init))
 
-    h_eff = float(np.clip(h_ospedalizzazione, 0.0, 1.0))
-    tau_eff = int(max(0, tau_ospedalizzazione))
-    tau_decesso_eff = int(max(0, tau_decesso_ospedaliero))
-    gamma_h_eff = float(max(0.0, gamma_ospedaliera))
-    delta_h_eff = float(np.clip(tasso_decesso_ospedaliero, 0.0, 1.0))
-    if considera_reinfezioni and durata_immunita_giorni > 0.0:
-        omega_reinfezione = 1.0 / float(durata_immunita_giorni)
+    h_eff = float(np.clip(h, 0.0, 1.0))
+    tau_ih_eff = int(max(0, tau_IH))
+    tau_ir_eff = int(max(0, tau_IR))
+    tau_hr_eff = int(max(0, tau_HR))
+    tau_hd_eff = int(max(0, tau_HD))
+    mu_H_eff = float(np.clip(mu_H, 0.0, 1.0))
+    if considera_reinfezioni and tau_IRS > 0.0:
+        tau_rs_eff = int(max(0, round(tau_IRS)))
     else:
-        omega_reinfezione = 0.0
+        tau_rs_eff = -1
 
     x_bar = socialita_prescritta_da_governo(c_s, kappa_prescrizione, tipo="logistica")
     x_bar_pred[0] = x_bar
@@ -786,22 +789,33 @@ def simula_finestra_predizione_stackelberg(
         new_infections = fattore * beta * S_pred[k] * I_pred[k] / N
         nuovi_infetti_hist[k] = new_infections
 
-        if k >= tau_eff:
-            new_hospitalizations = h_eff * nuovi_infetti_hist[k - tau_eff]
+        if k >= tau_ih_eff:
+            new_hospitalizations = h_eff * nuovi_infetti_hist[k - tau_ih_eff]
         else:
             new_hospitalizations = 0.0
+        nuovi_ospedalizzati_hist[k] = new_hospitalizations
 
-        # Decessi: traccia il flusso da H con ritardo tau_decesso_eff
-        decessi_potenziali = delta_h_eff * H_pred[k]
-        decessi_ospedalizzati_hist[k] = decessi_potenziali
-        if k >= tau_decesso_eff:
-            new_deaths_h = decessi_ospedalizzati_hist[k - tau_decesso_eff]
+        if k >= tau_ir_eff:
+            new_recoveries_non_h = (1.0 - h_eff) * nuovi_infetti_hist[k - tau_ir_eff]
+        else:
+            new_recoveries_non_h = 0.0
+
+        if k >= tau_hr_eff:
+            new_recoveries_h = (1.0 - mu_H_eff) * nuovi_ospedalizzati_hist[k - tau_hr_eff]
+        else:
+            new_recoveries_h = 0.0
+
+        if k >= tau_hd_eff:
+            new_deaths_h = mu_H_eff * nuovi_ospedalizzati_hist[k - tau_hd_eff]
         else:
             new_deaths_h = 0.0
 
-        new_recoveries_non_h = gamma * I_pred[k]
-        new_recoveries_h = gamma_h_eff * H_pred[k]
-        new_waning_immunity = min(omega_reinfezione * R_pred[k], R_pred[k])
+        ingressi_in_R = new_recoveries_non_h + new_recoveries_h
+        ingressi_in_R_hist[k] = ingressi_in_R
+        if tau_rs_eff >= 0 and k >= tau_rs_eff:
+            new_waning_immunity = ingressi_in_R_hist[k - tau_rs_eff]
+        else:
+            new_waning_immunity = 0.0
         
         S_pred[k + 1] = S_pred[k] - new_infections + new_waning_immunity
         I_pred[k + 1] = max(0.0, I_pred[k] + new_infections - new_hospitalizations - new_recoveries_non_h)
@@ -826,18 +840,19 @@ def costo_previsto_su_finestra_stackelberg(
     epsilon_logaritmica=epsilon_logaritmica_default,
     lambda_rischio_logaritmica=lambda_rischio_logaritmica_default,
     num_grid_logaritmica=num_grid_logaritmica_default,
-    h_ospedalizzazione=h_ospedalizzazione_default,
-    tau_ospedalizzazione=tau_ospedalizzazione_default,
-    gamma_ospedaliera=gamma_ospedaliera_default,
-    tasso_decesso_ospedaliero=tasso_decesso_ospedaliero_default,
-    tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
+    h=h_default,
+    tau_IH=tau_IH_default,
+    tau_IR=tau_IR_default,
+    tau_HR=tau_HR_default,
+    mu_H=mu_H_default,
+    tau_HD=tau_HD_default,
     H_init=H_t0_default,
     D_init=D_t0_default,
     cap_argomento_exp_saturazione=cap_argomento_exp_saturazione_default,
     lambda_reg_controllo=lambda_reg_controllo_default,
     tipo_best_response="quadratica",
     considera_reinfezioni=considera_reinfezioni_default,
-    durata_immunita_giorni=durata_immunita_giorni_default,
+    tau_IRS=tau_IRS_default,
 ):
     """
     Calcola il costo previsto su una finestra considerando la best response cittadino.
@@ -863,16 +878,17 @@ def costo_previsto_su_finestra_stackelberg(
         rho_rischio, eta_compliance,
         a_logaritmica, epsilon_logaritmica, lambda_rischio_logaritmica,
         num_grid_logaritmica,
-        h_ospedalizzazione,
-        tau_ospedalizzazione,
-        gamma_ospedaliera,
-        tasso_decesso_ospedaliero,
-        tau_decesso_ospedaliero,
+        h,
+        tau_IH,
+        tau_IR,
+        tau_HR,
+        mu_H,
+        tau_HD,
         H_init,
         D_init,
         tipo_best_response,
         considera_reinfezioni,
-        durata_immunita_giorni,
+        tau_IRS,
     )
     
     costo_epidemico = calcola_costo_epidemiologico_cumulato(
@@ -896,18 +912,19 @@ def ottimizza_c_s_su_finestra_stackelberg(
     epsilon_logaritmica=epsilon_logaritmica_default,
     lambda_rischio_logaritmica=lambda_rischio_logaritmica_default,
     num_grid_logaritmica=num_grid_logaritmica_default,
-    h_ospedalizzazione=h_ospedalizzazione_default,
-    tau_ospedalizzazione=tau_ospedalizzazione_default,
-    gamma_ospedaliera=gamma_ospedaliera_default,
-    tasso_decesso_ospedaliero=tasso_decesso_ospedaliero_default,
-    tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
+    h=h_default,
+    tau_IH=tau_IH_default,
+    tau_IR=tau_IR_default,
+    tau_HR=tau_HR_default,
+    mu_H=mu_H_default,
+    tau_HD=tau_HD_default,
     H_init=H_t0_default,
     D_init=D_t0_default,
     cap_argomento_exp_saturazione=cap_argomento_exp_saturazione_default,
     lambda_reg_controllo=lambda_reg_controllo_default,
     tipo_best_response="quadratica",
     considera_reinfezioni=considera_reinfezioni_default,
-    durata_immunita_giorni=durata_immunita_giorni_default,
+    tau_IRS=tau_IRS_default,
 ):
     """
     Ottimizza c_s su una finestra con grid search, considerando la reazione cittadino.
@@ -927,11 +944,12 @@ def ottimizza_c_s_su_finestra_stackelberg(
         costo_infetto_giornaliero, k_saturazione_ospedali, alpha_saturazione_ospedali,
         c_iniziale_clip, kappa_prescrizione, rho_rischio,
         eta_compliance, a_logaritmica, epsilon_logaritmica, lambda_rischio_logaritmica, num_grid_logaritmica,
-        h_ospedalizzazione, tau_ospedalizzazione, gamma_ospedaliera, tasso_decesso_ospedaliero, tau_decesso_ospedaliero,
+        h, tau_IH, tau_IR, tau_HR,
+        mu_H, tau_HD,
         H_init, D_init, cap_argomento_exp_saturazione, lambda_reg_controllo,
         tipo_best_response,
         considera_reinfezioni,
-        durata_immunita_giorni,
+        tau_IRS,
     )
     
     num_grid_points = num_grid_points_default
@@ -944,18 +962,19 @@ def ottimizza_c_s_su_finestra_stackelberg(
             eta_compliance, 
             a_logaritmica, epsilon_logaritmica, lambda_rischio_logaritmica,
             num_grid_logaritmica,
-            h_ospedalizzazione,
-            tau_ospedalizzazione,
-            gamma_ospedaliera,
-            tasso_decesso_ospedaliero,
-            tau_decesso_ospedaliero,
+            h,
+            tau_IH,
+            tau_IR,
+            tau_HR,
+            mu_H,
+            tau_HD,
             H_init,
             D_init,
             cap_argomento_exp_saturazione,
             lambda_reg_controllo,
             tipo_best_response,
             considera_reinfezioni,
-            durata_immunita_giorni,
+            tau_IRS,
         )
         for c_val in griglia_c
     ])
@@ -1013,17 +1032,18 @@ def simula_sir_stackelberg_con_controllo_periodico(
     epsilon_logaritmica=epsilon_logaritmica_default,
     lambda_rischio_logaritmica=lambda_rischio_logaritmica_default,
     num_grid_logaritmica=num_grid_logaritmica_default,
-    h_ospedalizzazione=h_ospedalizzazione_default,
-    tau_ospedalizzazione=tau_ospedalizzazione_default,
-    gamma_ospedaliera=gamma_ospedaliera_default,
-    tasso_decesso_ospedaliero=tasso_decesso_ospedaliero_default,
-    tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
+    h=h_default,
+    tau_IH=tau_IH_default,
+    tau_IR=tau_IR_default,
+    tau_HR=tau_HR_default,
+    mu_H=mu_H_default,
+    tau_HD=tau_HD_default,
     H_init=H_t0_default,
     D_init=D_t0_default,
     cap_argomento_exp_saturazione=cap_argomento_exp_saturazione_default,
     tipo_best_response="quadratica",
     considera_reinfezioni=considera_reinfezioni_default,
-    durata_immunita_giorni=durata_immunita_giorni_default,
+    tau_IRS=tau_IRS_default,
     verbose_progress=verbose_progress_default,
 ):
     """
@@ -1035,7 +1055,7 @@ def simula_sir_stackelberg_con_controllo_periodico(
     3) Dinamica evolve in base a x_t^*.
 
     Se considera_reinfezioni=True, il modello passa a una dinamica SIRS con
-    flusso R -> S parametrizzato da durata_immunita_giorni.
+    flusso R -> S parametrizzato da tau_IRS.
     """
     S = np.zeros(T + 1)
     I = np.zeros(T + 1)
@@ -1043,7 +1063,8 @@ def simula_sir_stackelberg_con_controllo_periodico(
     H = np.zeros(T + 1)
     D = np.zeros(T + 1)
     nuovi_infetti_hist = np.zeros(T)
-    decessi_ospedalizzati_hist = np.zeros(T)  # Traccia decessi dagli ospedalizzati per ritardo
+    nuovi_ospedalizzati_hist = np.zeros(T)
+    ingressi_in_R_hist = np.zeros(T)
     S[0], I[0], R[0] = S_t0, I_t0, R_t0
     H[0] = max(0.0, float(H_init))
     D[0] = max(0.0, float(D_init))
@@ -1058,19 +1079,20 @@ def simula_sir_stackelberg_con_controllo_periodico(
     c_guess = float(np.clip(c_iniziale, c_min, c_max))
     ultimo_checkpoint_stampato = -1                             # Per evitare di stampare troppo spesso, usiamo un checkpoint basato su percentuale di completamento.
     controllo_attivo = False                                    # Stato del controllo (attivo o no) basato sulla soglia di infetti.
-    prossimo_giorno_ottimizzazione = None                       # Giorno in cui il governo eseguirà la prossima ottimizzazione (se controllo attivo).
+    prossimo_giorno_ottimizzazione = None                       # Giorno in cui il governo eseguirÃ  la prossima ottimizzazione (se controllo attivo).
     c_applicato = c_min                                         # c_s effettivamente applicato oggi (inizialmente nessun controllo).  
     soglia_infetti_assoluta = soglia_attivazione_controllo * N  # Soglia in termini di numero assoluto di infetti per attivare il controllo.
     soglia_bassa = soglia_infetti_assoluta * fattore_isteresi   # Soglia bassa per disattivare il controllo, creando un'isteresi per evitare on-off frequenti.
-    h_eff = float(np.clip(h_ospedalizzazione, 0.0, 1.0))        # Efficienza ospedalizzazione, clippata per stabilità numerica.
-    tau_eff = int(max(0, tau_ospedalizzazione))                 # Tempo di latenza ospedalizzazione, clippato per stabilità numerica.
-    tau_decesso_eff = int(max(0, tau_decesso_ospedaliero))       # Tempo di latenza decessi dagli ospedalizzati.
-    gamma_h_eff = float(max(0.0, gamma_ospedaliera))            # Tasso di guarigione ospedaliera, clippato per stabilità numerica.
-    delta_h_eff = float(np.clip(tasso_decesso_ospedaliero, 0.0, 1.0))  # Tasso decessi tra ospedalizzati.
-    if considera_reinfezioni and durata_immunita_giorni > 0.0:
-        omega_reinfezione = 1.0 / float(durata_immunita_giorni)
+    h_eff = float(np.clip(h, 0.0, 1.0))        # Efficienza ospedalizzazione, clippata per stabilitÃ  numerica.
+    tau_ih_eff = int(max(0, tau_IH))               # Ritardo tra infezione e ospedalizzazione.
+    tau_ir_eff = int(max(0, tau_IR))   # Ritardo guarigione non ospedalizzati.
+    tau_hr_eff = int(max(0, tau_HR))       # Ritardo guarigione ospedalizzati.
+    tau_hd_eff = int(max(0, tau_HD))            # Ritardo decesso ospedalizzati.
+    mu_H_eff = float(np.clip(mu_H, 0.0, 1.0))  # Quota decessi tra ospedalizzati.
+    if considera_reinfezioni and tau_IRS > 0.0:
+        tau_rs_eff = int(max(0, round(tau_IRS)))
     else:
-        omega_reinfezione = 0.0
+        tau_rs_eff = -1
 
     if tipo_best_response not in ("quadratica", "logaritmica"): 
         raise ValueError(
@@ -1106,13 +1128,13 @@ def simula_sir_stackelberg_con_controllo_periodico(
                 kappa_prescrizione, rho_rischio, eta_compliance,
                 a_logaritmica, epsilon_logaritmica, lambda_rischio_logaritmica,
                 num_grid_logaritmica,
-                h_eff, tau_eff, gamma_h_eff, delta_h_eff, tau_decesso_eff,
+                h_eff, tau_ih_eff, tau_ir_eff, tau_hr_eff, mu_H_eff, tau_hd_eff,
                 H[giorno], D[giorno],
                 cap_argomento_exp_saturazione,
                 lambda_reg_controllo,
                 tipo_best_response,
                 considera_reinfezioni,
-                durata_immunita_giorni,
+                tau_IRS,
             )
             
             c_applicato = c_ottimo
@@ -1144,22 +1166,33 @@ def simula_sir_stackelberg_con_controllo_periodico(
         new_infections = fattore * beta * S[giorno] * I[giorno] / N
         nuovi_infetti_hist[giorno] = new_infections
 
-        if giorno >= tau_eff:
-            new_hospitalizations = h_eff * nuovi_infetti_hist[giorno - tau_eff]
+        if giorno >= tau_ih_eff:
+            new_hospitalizations = h_eff * nuovi_infetti_hist[giorno - tau_ih_eff]
         else:
             new_hospitalizations = 0.0
+        nuovi_ospedalizzati_hist[giorno] = new_hospitalizations
 
-        # Decessi: traccia il flusso da H con ritardo tau_decesso_eff
-        decessi_potenziali = delta_h_eff * H[giorno]
-        decessi_ospedalizzati_hist[giorno] = decessi_potenziali
-        if giorno >= tau_decesso_eff:
-            new_deaths_h = decessi_ospedalizzati_hist[giorno - tau_decesso_eff]
+        if giorno >= tau_ir_eff:
+            new_recoveries_non_h = (1.0 - h_eff) * nuovi_infetti_hist[giorno - tau_ir_eff]
+        else:
+            new_recoveries_non_h = 0.0
+
+        if giorno >= tau_hr_eff:
+            new_recoveries_h = (1.0 - mu_H_eff) * nuovi_ospedalizzati_hist[giorno - tau_hr_eff]
+        else:
+            new_recoveries_h = 0.0
+
+        if giorno >= tau_hd_eff:
+            new_deaths_h = mu_H_eff * nuovi_ospedalizzati_hist[giorno - tau_hd_eff]
         else:
             new_deaths_h = 0.0
 
-        new_recoveries_non_h = gamma * I[giorno]
-        new_recoveries_h = gamma_h_eff * H[giorno]
-        new_waning_immunity = min(omega_reinfezione * R[giorno], R[giorno])
+        ingressi_in_R = new_recoveries_non_h + new_recoveries_h
+        ingressi_in_R_hist[giorno] = ingressi_in_R
+        if tau_rs_eff >= 0 and giorno >= tau_rs_eff:
+            new_waning_immunity = ingressi_in_R_hist[giorno - tau_rs_eff]
+        else:
+            new_waning_immunity = 0.0
         # Aggiorna i compartimenti S, I, H, R con i nuovi flussi, assicurandosi di non andare sotto zero.
         S[giorno + 1] = S[giorno] - new_infections + new_waning_immunity
         I[giorno + 1] = max(0.0, I[giorno] + new_infections - new_hospitalizations - new_recoveries_non_h)
@@ -1205,7 +1238,7 @@ def plot_dinamica_compartimenti_stackelberg(
     """Visualizza dinamica compartimenti (stessa logica di deterministic.py)."""
     fig, axes = plt.subplots(2, 1, figsize=(12, 9), sharex=True)
     fig.suptitle(
-        f"Modello SIR Stackelberg — Governo vs Cittadini\n"
+        f"Modello SIR Stackelberg â€” Governo vs Cittadini\n"
         f"Utility cittadini: {simulation_label}  |  "
         f"$N={N}$,  $\\beta={beta}$,  $\\gamma={gamma}$,  $R_0={R0:.1f}$",
         fontsize=14,
@@ -1213,13 +1246,13 @@ def plot_dinamica_compartimenti_stackelberg(
     )
     
     ax1 = axes[0]
-    ax1.plot(t, S / N * 100, color="steelblue", lw=2, label="S — Suscettibili")
-    ax1.plot(t, I / N * 100, color="crimson", lw=2, label="I — Infetti (con Stackelberg)")
-    ax1.plot(t, R / N * 100, color="forestgreen", lw=2, label="R — Rimossi/Guariti")
+    ax1.plot(t, S / N * 100, color="steelblue", lw=2, label="S â€” Suscettibili")
+    ax1.plot(t, I / N * 100, color="crimson", lw=2, label="I â€” Infetti (con Stackelberg)")
+    ax1.plot(t, R / N * 100, color="forestgreen", lw=2, label="R â€” Rimossi/Guariti")
     if H is not None:
-        ax1.plot(t, H / N * 100, color="darkorange", lw=2, label="H — Ospedalizzati")
+        ax1.plot(t, H / N * 100, color="darkorange", lw=2, label="H â€” Ospedalizzati")
     if D is not None:
-        ax1.plot(t, D / N * 100, color="black", lw=2, label="D — Decessi cumulati")
+        ax1.plot(t, D / N * 100, color="black", lw=2, label="D â€” Decessi cumulati")
     ax1.axvline(t_picco, color="crimson", lw=1.2, ls="--", alpha=0.6,
                 label=f"Picco I (giorno {t_picco})")
     ax1.set_ylabel("Frazione di popolazione (%)", fontsize=11)
@@ -1298,7 +1331,7 @@ def plot_dinamica_compartimenti_stackelberg(
     else:
         ax2.legend(fontsize=10)
     ax2.set_xlabel("Tempo (giorni)", fontsize=11)
-    ax2.set_title("Incidenza giornaliera (flusso S → I)", fontsize=11)
+    ax2.set_title("Incidenza giornaliera (flusso S â†’ I)", fontsize=11)
     ax2.grid(True, alpha=0.3)
     
     plt.tight_layout()
@@ -1327,7 +1360,7 @@ def plot_controllo_e_comportamento_stackelberg(
     costo_istantaneo_controllo = costo_istantaneo[:-1]
     
     # c_s(t)
-    axes[0].step(t_controllo, c_schedule, where="post", lw=2, color="purple", label="c_s(t) — Governo")
+    axes[0].step(t_controllo, c_schedule, where="post", lw=2, color="purple", label="c_s(t) â€” Governo")
     axes[0].set_ylabel("c_s", fontsize=10)
     axes[0].grid(True, alpha=0.3)
     ax0_right = axes[0].twinx()
@@ -1347,8 +1380,8 @@ def plot_controllo_e_comportamento_stackelberg(
     axes[0].set_title("Spesa pubblica e costo epidemico istantaneo", fontsize=11)
     
     # x_bar vs x_star
-    axes[1].plot(t_controllo, x_bar_schedule, lw=2, color="orange", label="$\\bar{x}(t)$ — Prescrizione", marker='o', markersize=2)
-    axes[1].plot(t_controllo, x_star_schedule, lw=2, color="green", label="$x^*(t)$ — Best response", marker='s', markersize=2)
+    axes[1].plot(t_controllo, x_bar_schedule, lw=2, color="orange", label="$\\bar{x}(t)$ â€” Prescrizione", marker='o', markersize=2)
+    axes[1].plot(t_controllo, x_star_schedule, lw=2, color="green", label="$x^*(t)$ â€” Best response", marker='s', markersize=2)
     axes[1].set_ylabel("Socialita", fontsize=10)
     axes[1].set_ylim(0, 1.05)
     axes[1].grid(True, alpha=0.3)
@@ -1366,7 +1399,7 @@ def plot_controllo_e_comportamento_stackelberg(
     axes[2].set_title("Scostamento dalla prescrizione", fontsize=11)
     
     # Rischio percepito
-    axes[3].plot(t_controllo, p_rischio_schedule, lw=2, color="darkred", label="$p_t$ — Rischio percepito")
+    axes[3].plot(t_controllo, p_rischio_schedule, lw=2, color="darkred", label="$p_t$ â€” Rischio percepito")
     axes[3].fill_between(t_controllo, 0, p_rischio_schedule, alpha=0.3, color="darkred")
     axes[3].set_ylabel("Rischio", fontsize=10)
     axes[3].set_ylim(0, 1.05)
@@ -1410,7 +1443,7 @@ def esegui_scansione_alpha_lambda(
                 lambda_reg_controllo=lambda_val,
                 kappa_prescrizione=kappa_prescrizione,
                 rho_rischio=rho_rischio, eta_compliance=eta_compliance,
-                tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
+                tau_HD=tau_HD_default,
                 tipo_best_response="quadratica",
                 verbose_progress=False,
             )
@@ -1477,7 +1510,7 @@ def esegui_scansione_trigger_isteresi(
                 kappa_prescrizione=kappa_prescrizione,
                 rho_rischio=rho_rischio,
                 eta_compliance=eta_compliance,
-                tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
+                tau_HD=tau_HD_default,
                 tipo_best_response="quadratica",
                 verbose_progress=False,
             )
@@ -1548,7 +1581,7 @@ def esegui_scansione_comportamento(
                     kappa_prescrizione=kappa_val,
                     rho_rischio=rho_val,
                     eta_compliance=eta_val,
-                    tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
+                    tau_HD=tau_HD_default,
                     tipo_best_response="quadratica",
                     verbose_progress=False,
                 )
@@ -1636,7 +1669,7 @@ def calibra_parametri_logaritmica_min_picco_due_stadi(
             epsilon_logaritmica=epsilon_logaritmica_default,
             lambda_rischio_logaritmica=lambda_rischio_val,
             num_grid_logaritmica=num_grid_logaritmica_default,
-            tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
+            tau_HD=tau_HD_default,
             tipo_best_response="logaritmica",
             verbose_progress=False,
         )
@@ -1808,7 +1841,7 @@ def valuta_scenario_target_picco(
         kappa_prescrizione=kappa_prescrizione,
         rho_rischio=rho_rischio,
         eta_compliance=eta_compliance,
-        tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
+        tau_HD=tau_HD_default,
         tipo_best_response="quadratica",
         verbose_progress=False,
     )
@@ -1890,7 +1923,7 @@ def esegui_scansione_target_picco(
                 kappa_prescrizione=kappa_prescrizione,
                 rho_rischio=rho_rischio,
                 eta_compliance=eta_compliance,
-                tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
+                tau_HD=tau_HD_default,
                 tipo_best_response="quadratica",
                 verbose_progress=False,
             )
@@ -2120,7 +2153,7 @@ def main():
     print(
         "Reinfezioni abilitate: "
         f"{considera_reinfezioni_default} | "
-        f"durata immunita media (giorni): {durata_immunita_giorni_default:.1f}"
+        f"ritardo immunita R->S (giorni): {tau_IRS_default:.1f}"
     )
 
     risultati_confronto = esegui_confronto_quadratica_vs_logaritmica()
@@ -2165,7 +2198,7 @@ def esegui_confronto_quadratica_vs_logaritmica():
         lambda_reg_controllo=lambda_reg_controllo,
         kappa_prescrizione=kappa_prescrizione, rho_rischio=rho_rischio,
         eta_compliance=eta_compliance,
-        tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
+        tau_HD=tau_HD_default,
         tipo_best_response="quadratica",
         verbose_progress=verbose_progress_default,
     )
@@ -2194,7 +2227,7 @@ def esegui_confronto_quadratica_vs_logaritmica():
         a_logaritmica=a_logaritmica_default, epsilon_logaritmica=epsilon_logaritmica_default,
         lambda_rischio_logaritmica=lambda_rischio_logaritmica_default,
         num_grid_logaritmica=num_grid_logaritmica_default,
-        tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
+        tau_HD=tau_HD_default,
         tipo_best_response="logaritmica",
         verbose_progress=verbose_progress_default,
     )
@@ -2329,5 +2362,7 @@ def genera_grafici_confronto(risultati_confronto):
 
 if __name__ == "__main__":
     main()
+
+
 
 
