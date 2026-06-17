@@ -40,18 +40,16 @@ epidemico corrente. Se gli infetti aumentano, aumenta il rischio percepito.
 
 Nel caso quadratico, la funzione di utilita e:
 
-    U_t(x) = b0 * x - lambda * p_t * x - (q / 2) * x^2 - (eta / 2) * (x - x_bar)^2
+    U_t(x) = - lambda * p_t * x - (eta / 2) * (x - x_bar)^2
 
 La condizione del primo ordine produce:
 
-    x_t^* = (b0 - lambda * p_t + eta * x_bar) / (q + eta)
+    x_t^* = x_bar - (lambda * p_t) / eta
 
 Poi si applica clipping in [0, 1].
 
 Perche:
-- b0 * x rappresenta il beneficio privato della socialita.
 - lambda * p_t * x rappresenta il costo sanitario percepito.
-- (q / 2) * x^2 introduce rendimenti marginali decrescenti della socialita.
 - (eta / 2) * (x - x_bar)^2 misura il costo di non conformarsi alla prescrizione.
 
 Quindi c_s entra in x_t^* indirettamente tramite x_bar(c_s): se il governo aumenta
@@ -178,6 +176,7 @@ gamma_ospedaliera_default = 1.0 / degenza_media_ospedaliera_default
 D_t0_default = 0.0
 # Calibrazione COVID: con gamma_ospedaliera=0.1 e delta=0.017 -> CFR_H ~ 14.5%
 tasso_decesso_ospedaliero_default = 0.017
+tau_decesso_ospedaliero_default = 7  # Ritardo tra ospedalizzazione e decesso (giorni)
 
 # Parametro di efficacia della policy (vecchio modello, mantenuto per retro-compatibilita)
 m_controllo = 2.0
@@ -240,7 +239,7 @@ top_k_stage1_default = 3
 fattori_raffinamento_lambda_default = [0.7, 0.85, 1.0, 1.15, 1.35]
 fattori_raffinamento_cmax_default = [0.75, 0.9, 1.0, 1.1, 1.25]
 
-T        = 2000        # Durata della simulazione
+T        = 560        # Durata della simulazione
 t        = np.arange(0, T + 1)
 
 # ===== NUOVI PARAMETRI PER STACKELBERG (Cittadini) =====
@@ -253,7 +252,7 @@ target_socialita_al_massimo_controllo = 1.0 / (1.0 + kappa_prescrizione * c_max_
 rho_rischio_default = 1.5  # scala da I_t/N a rischio individuale
 rho_rischio = rho_rischio_default
 
-# Utilita cittadino (forma quadratica)
+# Utilita cittadino (forma quadratica semplificata)
 eta_compliance_default = 12.0  # costo di deviazione dalla prescrizione (compliance)
 eta_compliance = eta_compliance_default
 lambda_rischio_quadratica_default = 1.0
@@ -370,9 +369,12 @@ def best_response_cittadino_quadratica(
     lambda_rischio=lambda_rischio_quadratica_default,
 ):
     """
-    Best response del cittadino per utility quadratica.
+    Best response del cittadino per utility quadratica semplificata:
 
-    La soluzione non vincolata viene poi clippata nell'intervallo [0, 1].
+    U_t(x) = - lambda * p_t * x - (eta / 2) * (x - x_bar)^2
+    => x_t^* = x_bar - (lambda * p_t) / eta, con clipping in [0, 1].
+
+    Nota: si assume eta_compliance > 0.
     """
     if eta_compliance > 0:
         x_star_unconstrained = x_bar - (lambda_rischio * p_t) / eta_compliance
@@ -697,6 +699,7 @@ def simula_finestra_predizione_stackelberg(
     tau_ospedalizzazione=tau_ospedalizzazione_default,
     gamma_ospedaliera=gamma_ospedaliera_default,
     tasso_decesso_ospedaliero=tasso_decesso_ospedaliero_default,
+    tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
     H_init=H_t0_default,
     D_init=D_t0_default,
     tipo_best_response="quadratica",
@@ -741,6 +744,7 @@ def simula_finestra_predizione_stackelberg(
     x_bar_pred = np.zeros(orizzonte + 1)
     x_star_pred = np.zeros(orizzonte + 1)
     nuovi_infetti_hist = np.zeros(orizzonte)
+    decessi_ospedalizzati_hist = np.zeros(orizzonte)  # Traccia decessi dagli ospedalizzati per ritardo
     
     S_pred[0] = S_init
     I_pred[0] = I_init
@@ -750,6 +754,7 @@ def simula_finestra_predizione_stackelberg(
 
     h_eff = float(np.clip(h_ospedalizzazione, 0.0, 1.0))
     tau_eff = int(max(0, tau_ospedalizzazione))
+    tau_decesso_eff = int(max(0, tau_decesso_ospedaliero))
     gamma_h_eff = float(max(0.0, gamma_ospedaliera))
     delta_h_eff = float(np.clip(tasso_decesso_ospedaliero, 0.0, 1.0))
     if considera_reinfezioni and durata_immunita_giorni > 0.0:
@@ -786,9 +791,16 @@ def simula_finestra_predizione_stackelberg(
         else:
             new_hospitalizations = 0.0
 
+        # Decessi: traccia il flusso da H con ritardo tau_decesso_eff
+        decessi_potenziali = delta_h_eff * H_pred[k]
+        decessi_ospedalizzati_hist[k] = decessi_potenziali
+        if k >= tau_decesso_eff:
+            new_deaths_h = decessi_ospedalizzati_hist[k - tau_decesso_eff]
+        else:
+            new_deaths_h = 0.0
+
         new_recoveries_non_h = gamma * I_pred[k]
         new_recoveries_h = gamma_h_eff * H_pred[k]
-        new_deaths_h = delta_h_eff * H_pred[k]
         new_waning_immunity = min(omega_reinfezione * R_pred[k], R_pred[k])
         
         S_pred[k + 1] = S_pred[k] - new_infections + new_waning_immunity
@@ -818,6 +830,7 @@ def costo_previsto_su_finestra_stackelberg(
     tau_ospedalizzazione=tau_ospedalizzazione_default,
     gamma_ospedaliera=gamma_ospedaliera_default,
     tasso_decesso_ospedaliero=tasso_decesso_ospedaliero_default,
+    tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
     H_init=H_t0_default,
     D_init=D_t0_default,
     cap_argomento_exp_saturazione=cap_argomento_exp_saturazione_default,
@@ -854,6 +867,7 @@ def costo_previsto_su_finestra_stackelberg(
         tau_ospedalizzazione,
         gamma_ospedaliera,
         tasso_decesso_ospedaliero,
+        tau_decesso_ospedaliero,
         H_init,
         D_init,
         tipo_best_response,
@@ -886,6 +900,7 @@ def ottimizza_c_s_su_finestra_stackelberg(
     tau_ospedalizzazione=tau_ospedalizzazione_default,
     gamma_ospedaliera=gamma_ospedaliera_default,
     tasso_decesso_ospedaliero=tasso_decesso_ospedaliero_default,
+    tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
     H_init=H_t0_default,
     D_init=D_t0_default,
     cap_argomento_exp_saturazione=cap_argomento_exp_saturazione_default,
@@ -912,7 +927,7 @@ def ottimizza_c_s_su_finestra_stackelberg(
         costo_infetto_giornaliero, k_saturazione_ospedali, alpha_saturazione_ospedali,
         c_iniziale_clip, kappa_prescrizione, rho_rischio,
         eta_compliance, a_logaritmica, epsilon_logaritmica, lambda_rischio_logaritmica, num_grid_logaritmica,
-        h_ospedalizzazione, tau_ospedalizzazione, gamma_ospedaliera, tasso_decesso_ospedaliero,
+        h_ospedalizzazione, tau_ospedalizzazione, gamma_ospedaliera, tasso_decesso_ospedaliero, tau_decesso_ospedaliero,
         H_init, D_init, cap_argomento_exp_saturazione, lambda_reg_controllo,
         tipo_best_response,
         considera_reinfezioni,
@@ -933,6 +948,7 @@ def ottimizza_c_s_su_finestra_stackelberg(
             tau_ospedalizzazione,
             gamma_ospedaliera,
             tasso_decesso_ospedaliero,
+            tau_decesso_ospedaliero,
             H_init,
             D_init,
             cap_argomento_exp_saturazione,
@@ -1001,6 +1017,7 @@ def simula_sir_stackelberg_con_controllo_periodico(
     tau_ospedalizzazione=tau_ospedalizzazione_default,
     gamma_ospedaliera=gamma_ospedaliera_default,
     tasso_decesso_ospedaliero=tasso_decesso_ospedaliero_default,
+    tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
     H_init=H_t0_default,
     D_init=D_t0_default,
     cap_argomento_exp_saturazione=cap_argomento_exp_saturazione_default,
@@ -1026,6 +1043,7 @@ def simula_sir_stackelberg_con_controllo_periodico(
     H = np.zeros(T + 1)
     D = np.zeros(T + 1)
     nuovi_infetti_hist = np.zeros(T)
+    decessi_ospedalizzati_hist = np.zeros(T)  # Traccia decessi dagli ospedalizzati per ritardo
     S[0], I[0], R[0] = S_t0, I_t0, R_t0
     H[0] = max(0.0, float(H_init))
     D[0] = max(0.0, float(D_init))
@@ -1046,6 +1064,7 @@ def simula_sir_stackelberg_con_controllo_periodico(
     soglia_bassa = soglia_infetti_assoluta * fattore_isteresi   # Soglia bassa per disattivare il controllo, creando un'isteresi per evitare on-off frequenti.
     h_eff = float(np.clip(h_ospedalizzazione, 0.0, 1.0))        # Efficienza ospedalizzazione, clippata per stabilità numerica.
     tau_eff = int(max(0, tau_ospedalizzazione))                 # Tempo di latenza ospedalizzazione, clippato per stabilità numerica.
+    tau_decesso_eff = int(max(0, tau_decesso_ospedaliero))       # Tempo di latenza decessi dagli ospedalizzati.
     gamma_h_eff = float(max(0.0, gamma_ospedaliera))            # Tasso di guarigione ospedaliera, clippato per stabilità numerica.
     delta_h_eff = float(np.clip(tasso_decesso_ospedaliero, 0.0, 1.0))  # Tasso decessi tra ospedalizzati.
     if considera_reinfezioni and durata_immunita_giorni > 0.0:
@@ -1087,7 +1106,7 @@ def simula_sir_stackelberg_con_controllo_periodico(
                 kappa_prescrizione, rho_rischio, eta_compliance,
                 a_logaritmica, epsilon_logaritmica, lambda_rischio_logaritmica,
                 num_grid_logaritmica,
-                h_eff, tau_eff, gamma_h_eff, delta_h_eff,
+                h_eff, tau_eff, gamma_h_eff, delta_h_eff, tau_decesso_eff,
                 H[giorno], D[giorno],
                 cap_argomento_exp_saturazione,
                 lambda_reg_controllo,
@@ -1130,9 +1149,16 @@ def simula_sir_stackelberg_con_controllo_periodico(
         else:
             new_hospitalizations = 0.0
 
+        # Decessi: traccia il flusso da H con ritardo tau_decesso_eff
+        decessi_potenziali = delta_h_eff * H[giorno]
+        decessi_ospedalizzati_hist[giorno] = decessi_potenziali
+        if giorno >= tau_decesso_eff:
+            new_deaths_h = decessi_ospedalizzati_hist[giorno - tau_decesso_eff]
+        else:
+            new_deaths_h = 0.0
+
         new_recoveries_non_h = gamma * I[giorno]
         new_recoveries_h = gamma_h_eff * H[giorno]
-        new_deaths_h = delta_h_eff * H[giorno]
         new_waning_immunity = min(omega_reinfezione * R[giorno], R[giorno])
         # Aggiorna i compartimenti S, I, H, R con i nuovi flussi, assicurandosi di non andare sotto zero.
         S[giorno + 1] = S[giorno] - new_infections + new_waning_immunity
@@ -1207,21 +1233,71 @@ def plot_dinamica_compartimenti_stackelberg(
     nuovi_infetti = np.maximum(0.0, S[:-1] - S[1:])
     ax2.plot(t[:-1], nuovi_infetti, color="crimson", lw=2,
              label="Nuovi infetti / giorno")
+    ax2.set_ylabel("Nuovi infetti", fontsize=11, color="crimson")
+    ax2.tick_params(axis="y", colors="crimson")
+    ax2.spines["left"].set_color("crimson")
+
+    ax2_right = None
+    ax2_deaths = None
     if H is not None:
         ax2_right = ax2.twinx()
-        ax2_right.plot(t, H, color="darkorange", lw=1.8, alpha=0.85, label="Ospedalizzati H(t)")
-        if D is not None:
-            nuovi_decessi = np.maximum(0.0, D[1:] - D[:-1])
-            ax2_right.plot(t[:-1], nuovi_decessi, color="black", lw=1.6, alpha=0.8, ls=":", label="Nuovi decessi / giorno")
+        ax2_right.plot(t, H, color="darkorange", lw=2.0, alpha=0.95, label="Ospedalizzati H(t)")
         ax2_right.set_ylabel("Ospedalizzati", fontsize=11, color="darkorange")
-        ax2_right.tick_params(axis="y", labelcolor="darkorange")
+        ax2_right.tick_params(axis="y", labelcolor="darkorange", colors="darkorange")
+        ax2_right.spines["right"].set_color("darkorange")
+        ax2_right.patch.set_visible(False)
+        ax2_right.set_zorder(3)
+
+    if D is not None:
+        nuovi_decessi = np.maximum(0.0, D[1:] - D[:-1])
+        scala_decessi = 1.2
+        if ax2_right is not None:
+            ax2_deaths = ax2.twinx()
+            ax2_deaths.spines["right"].set_position(("outward", 55))
+        else:
+            ax2_deaths = ax2.twinx()
+        ax2_deaths.patch.set_visible(False)
+        ax2_deaths.set_zorder(4)
+        ax2_deaths.plot(
+            t[:-1],
+            nuovi_decessi * scala_decessi,
+            color="black",
+            lw=1.4,
+            alpha=0.75,
+            ls="--",
+            label="Nuovi decessi / giorno",
+        )
+        ax2_deaths.set_ylabel("Nuovi decessi (scala 1.2x)", fontsize=11, color="black")
+        ax2_deaths.tick_params(axis="y", labelcolor="black", colors="black")
+        ax2_deaths.spines["right"].set_color("black")
+
+        # Ridisegna H sopra la curva dei decessi per evitare sovrapposizione visiva.
+        if ax2_right is not None:
+            ax2_right.plot(
+                t,
+                H,
+                color="darkorange",
+                lw=2.4,
+                alpha=1.0,
+                label="_nolegend_",
+                zorder=10,
+            )
+
+    if ax2_right is not None or ax2_deaths is not None:
         lines_left, labels_left = ax2.get_legend_handles_labels()
-        lines_right, labels_right = ax2_right.get_legend_handles_labels()
+        lines_right, labels_right = [], []
+        if ax2_right is not None:
+            lr, lb = ax2_right.get_legend_handles_labels()
+            lines_right.extend(lr)
+            labels_right.extend(lb)
+        if ax2_deaths is not None:
+            lr, lb = ax2_deaths.get_legend_handles_labels()
+            lines_right.extend(lr)
+            labels_right.extend(lb)
         ax2.legend(lines_left + lines_right, labels_left + labels_right, fontsize=10, loc="upper right")
     else:
         ax2.legend(fontsize=10)
     ax2.set_xlabel("Tempo (giorni)", fontsize=11)
-    ax2.set_ylabel("Nuovi infetti", fontsize=11)
     ax2.set_title("Incidenza giornaliera (flusso S → I)", fontsize=11)
     ax2.grid(True, alpha=0.3)
     
@@ -1334,6 +1410,7 @@ def esegui_scansione_alpha_lambda(
                 lambda_reg_controllo=lambda_val,
                 kappa_prescrizione=kappa_prescrizione,
                 rho_rischio=rho_rischio, eta_compliance=eta_compliance,
+                tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
                 tipo_best_response="quadratica",
                 verbose_progress=False,
             )
@@ -1400,6 +1477,7 @@ def esegui_scansione_trigger_isteresi(
                 kappa_prescrizione=kappa_prescrizione,
                 rho_rischio=rho_rischio,
                 eta_compliance=eta_compliance,
+                tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
                 tipo_best_response="quadratica",
                 verbose_progress=False,
             )
@@ -1470,6 +1548,7 @@ def esegui_scansione_comportamento(
                     kappa_prescrizione=kappa_val,
                     rho_rischio=rho_val,
                     eta_compliance=eta_val,
+                    tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
                     tipo_best_response="quadratica",
                     verbose_progress=False,
                 )
@@ -1557,6 +1636,7 @@ def calibra_parametri_logaritmica_min_picco_due_stadi(
             epsilon_logaritmica=epsilon_logaritmica_default,
             lambda_rischio_logaritmica=lambda_rischio_val,
             num_grid_logaritmica=num_grid_logaritmica_default,
+            tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
             tipo_best_response="logaritmica",
             verbose_progress=False,
         )
@@ -1728,6 +1808,7 @@ def valuta_scenario_target_picco(
         kappa_prescrizione=kappa_prescrizione,
         rho_rischio=rho_rischio,
         eta_compliance=eta_compliance,
+        tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
         tipo_best_response="quadratica",
         verbose_progress=False,
     )
@@ -1809,6 +1890,7 @@ def esegui_scansione_target_picco(
                 kappa_prescrizione=kappa_prescrizione,
                 rho_rischio=rho_rischio,
                 eta_compliance=eta_compliance,
+                tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
                 tipo_best_response="quadratica",
                 verbose_progress=False,
             )
@@ -2083,6 +2165,7 @@ def esegui_confronto_quadratica_vs_logaritmica():
         lambda_reg_controllo=lambda_reg_controllo,
         kappa_prescrizione=kappa_prescrizione, rho_rischio=rho_rischio,
         eta_compliance=eta_compliance,
+        tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
         tipo_best_response="quadratica",
         verbose_progress=verbose_progress_default,
     )
@@ -2111,6 +2194,7 @@ def esegui_confronto_quadratica_vs_logaritmica():
         a_logaritmica=a_logaritmica_default, epsilon_logaritmica=epsilon_logaritmica_default,
         lambda_rischio_logaritmica=lambda_rischio_logaritmica_default,
         num_grid_logaritmica=num_grid_logaritmica_default,
+        tau_decesso_ospedaliero=tau_decesso_ospedaliero_default,
         tipo_best_response="logaritmica",
         verbose_progress=verbose_progress_default,
     )
