@@ -1,0 +1,202 @@
+DESCRIZIONE DETTAGLIATA - deterministic_stackelberg_multigroup.py
+=================================================================
+
+STATO ATTUALE DEL CODICE
+========================
+
+Il file implementa una estensione multigruppo del modello Stackelberg
+(governo-cittadini) con dinamica epidemiologica deterministica S-I-H-R-D.
+
+Differenza chiave rispetto alla versione single-group:
+- gli stati epidemiologici possono essere vettori per gruppo;
+- la trasmissione tra gruppi usa una matrice di contatto C;
+- i parametri comportamentali/clinici possono essere scalari o vettoriali,
+  con broadcast automatico.
+
+La run principale confronta comunque due specifiche di follower:
+- best response quadratica;
+- best response logaritmica.
+
+Output di run: metriche comparative aggregate + 4 grafici PNG.
+
+
+MODELLO MULTIGRUPPO E FORMULE
+=============================
+
+1) Prescrizione sociale del governo (per gruppo)
+------------------------------------------------
+x_bar_g(c_s) = 1 / (1 + kappa_g * c_s)
+
+In codice, kappa puo essere scalare o vettore lungo n_groups.
+
+2) Rischio percepito (per gruppo)
+---------------------------------
+p_g,t = clip(rho_g * (I_g,t + H_g,t) / N_g, 0, 1)
+
+3) Best response cittadino (per gruppo)
+---------------------------------------
+3.1 Quadratica:
+x_star_g,t = clip(x_bar_g - (lambda_rischio * p_g,t) / eta_g, 0, 1)
+
+3.2 Logaritmica con compliance:
+U_g(x) = a * log(x + epsilon)
+         - lambda_rischio * p_g,t * x
+         - (eta_g / 2) * (x - x_bar_g)^2
+
+La best response logaritmica e ottimizzata numericamente su griglia [0, 1]
+per ciascun gruppo.
+
+4) Forza di infezione con matrice contatti
+-------------------------------------------
+f_g = x_star_g^potenza
+prevalenza_g = I_g / N_g
+
+forza_infezione = beta * f .* (C @ (f .* prevalenza))
+new_infections_g = S_g * forza_infezione_g
+
+(dove .* indica prodotto elemento per elemento)
+
+5) Dinamica compartimentale per gruppo con ritardi
+---------------------------------------------------
+Per ogni gruppo g, con code storiche per ritardi:
+- new_hospitalizations_g,t = h_g * new_infections_g,{t - tau_IH}
+- new_recoveries_non_h_g,t = (1 - h_g) * new_infections_g,{t - tau_IR}
+- new_recoveries_h_g,t = (1 - mu_H_g) * new_hospitalizations_g,{t - tau_HR}
+- new_deaths_h_g,t = mu_H_g * new_hospitalizations_g,{t - tau_HD}
+- new_waning_immunity_g,t = ingressi_in_R_g,{t - tau_IRS} (se reinfezioni abilitate)
+
+Aggiornamenti:
+- S_g,t+1 = S_g,t - new_infections_g,t + new_waning_immunity_g,t
+- I_g,t+1 = max(0, I_g,t + new_infections_g,t - new_hospitalizations_g,t - new_recoveries_non_h_g,t)
+- H_g,t+1 = max(0, H_g,t + new_hospitalizations_g,t - new_recoveries_h_g,t - new_deaths_h_g,t)
+- R_g,t+1 = max(0, R_g,t + new_recoveries_non_h_g,t + new_recoveries_h_g,t - new_waning_immunity_g,t)
+- D_g,t+1 = max(0, D_g,t + new_deaths_h_g,t)
+
+6) Costo del governo nella finestra MPC
+---------------------------------------
+Il costo resta calcolato sulla traiettoria aggregata (somma gruppi), con:
+- costo epidemico: termine lineare su I + saturazione ospedaliera su H;
+- costo controllo: lambda_reg_controllo * c_s^2 * (orizzonte + 1).
+
+
+PARAMETRI DEFAULT PRINCIPALI
+============================
+
+Base epidemiologica globale:
+- N = 100000
+- I_t0 = 10
+- R_t0 = 0
+- S_t0 = N - I_t0 - R_t0
+- beta = 0.3
+- gamma = 0.06
+- T = 560
+
+Default multigruppo (3 gruppi):
+- N_gruppi_default = [55000, 30000, 15000]
+- I_t0_gruppi_default = [6, 3, 1]
+- R_t0_gruppi_default = [0, 0, 0]
+- S_t0_gruppi_default = N_gruppi_default - I_t0_gruppi_default
+- matrice_contatti_default =
+  [[1.00, 0.55, 0.30],
+   [0.55, 1.00, 0.45],
+   [0.30, 0.45, 1.00]]
+- h_gruppi_default = [0.02, 0.05, 0.12]
+- mu_H_gruppi_default = [0.004, 0.018, 0.075]
+
+Ospedalizzazione/decessi/ritardi (default globali):
+- h_default = 0.04
+- mu_H_default = 0.017
+- tau_IH_default = 8
+- tau_IR_default = 13
+- tau_HR_default = 10
+- tau_HD_default = 7
+- H_t0_default = 0.0
+- D_t0_default = 0.0
+
+Controllo MPC:
+- lambda_reg_controllo_default = 14.0
+- intervallo_controllo_default = 80
+- orizzonte_predizione_default = 80
+- c_min_default = 0.05
+- c_max_default = 200.0
+- soglia_attivazione_controllo_default = 0.005
+- fattore_isteresi_default = 0.3
+
+Follower:
+- kappa_prescrizione_default = 0.05
+- rho_rischio_default = 1.5
+- eta_compliance_default = 12.0
+- lambda_rischio_quadratica_default = 1.0
+- a_logaritmica_default = 1.5
+- epsilon_logaritmica_default = 1e-3
+- lambda_rischio_logaritmica_default = 4.0
+- num_grid_logaritmica_default = 101
+
+Reinfezioni:
+- considera_reinfezioni_default = True
+- tau_IRS_default = 240.0
+
+
+FUNZIONI DEFINITE NEL FILE
+==========================
+
+Helper multigruppo:
+- _as_1d_float_array
+- _broadcast_to_groups
+- _contact_matrix
+
+Layer follower:
+- utilita_cittadino_logaritmica
+- socialita_prescritta_da_governo
+- rischio_percepito
+- best_response_cittadino_quadratica
+- best_response_cittadino_logaritmica
+- fattore_contatto_da_socialita
+
+Supporto/costi/core/analisi:
+- stesso impianto della versione single-group:
+  configurazione flag, costi epidemiologici, simulazioni di finestra,
+  ottimizzazione MPC, simulazione completa, plotting, scansioni,
+  confronto quadratica-vs-logaritmica e main.
+
+Nota runtime importante:
+- simula_sir_stackelberg_con_controllo_periodico ritorna traiettorie aggregate
+  (somma sui gruppi) per default;
+- opzionalmente puo restituire anche traiettorie per gruppo con
+  ritorna_traiettorie_per_gruppo=True.
+
+
+FLUSSO PRINCIPALE EFFETTIVO
+===========================
+
+Il blocco finale usa if __name__ == "__main__" e chiama main().
+
+main() esegue:
+1) stampa intestazione e stato reinfezioni;
+2) simulazione completa quadratica;
+3) simulazione completa logaritmica;
+4) metriche comparative aggregate (picchi, decessi, costo, compliance, gap);
+5) delta logaritmica - quadratica;
+6) salvataggio grafici.
+
+
+OUTPUT GRAFICI SALVATI
+======================
+
+Nella versione corrente vengono usati gli stessi nomi PNG della versione
+single-group:
+- sir_compartimenti_stackelberg_quadratica.png
+- sir_stackelberg_analisi_quadratica.png
+- sir_compartimenti_stackelberg_logaritmica.png
+- sir_stackelberg_analisi_logaritmica.png
+
+Questo implica che, se i due script vengono eseguiti entrambi, gli output
+con lo stesso nome possono essere sovrascritti.
+
+
+NOTE DI ALLINEAMENTO
+====================
+
+- Documento allineato allo stato attuale del codice multigruppo.
+- Le scansioni restano disponibili come strumenti analitici e non sono parte
+  obbligatoria del flusso standard di main() in profilo prudente.

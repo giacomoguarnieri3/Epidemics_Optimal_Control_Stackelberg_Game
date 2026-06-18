@@ -1,93 +1,98 @@
 DESCRIZIONE DETTAGLIATA - deterministic_stackelberg.py
-=======================================================
+======================================================
 
 STATO ATTUALE DEL CODICE
 ========================
 
-Il file implementa un modello epidemiologico deterministico SIRS/SIR con
-Stackelberg game:
-- leader: il governo, che sceglie la spesa di controllo c_s;
-- follower: i cittadini, che rispondono con una socialita x_t^*;
-- dinamica epidemiologica: compartimenti S, I, H, R, D con ospedalizzazione,
-  decessi ospedalieri e reinfezione opzionale.
+Il file implementa un modello epidemiologico deterministico Stackelberg con:
+- leader: governo, che decide una spesa di controllo c_s;
+- follower: cittadini, che rispondono con socialita effettiva x_star;
+- dinamica epidemiologica S-I-H-R-D con ritardi espliciti sui flussi;
+- reinfezioni opzionali (R -> S) tramite ritardo fisso tau_IRS.
 
-La run principale non esegue piu una singola simulazione: confronta due profili
-di comportamento dei cittadini, uno con best response quadratica e uno con
-best response logaritmica, poi stampa le metriche comparative e salva quattro
-grafici PNG.
+La run principale non esegue una sola simulazione, ma confronta due specifiche
+di utilita dei follower:
+- best response quadratica;
+- best response logaritmica (massimizzazione numerica su griglia).
 
-Le funzioni di scansione e calibrazione restano nel file come strumenti di
-analisi, ma non fanno parte del flusso standard richiamato da main().
+Alla fine stampa metriche comparative e salva quattro grafici PNG.
 
 
-MODELLO E FORMULE USATE NEL CODICE
-==================================
+MODELLO E FORMULE ATTUALI
+=========================
 
-1) Prescrizione sociale del governo
-------------------------------------
-x_bar(c_s) = 1 / (1 + kappa * c_s)
+1) Prescrizione sociale dal controllo pubblico
+----------------------------------------------
+x_bar(c_s) = 1 / (1 + kappa * c_s)  (default usata: logistica)
 
-Nel file esiste anche la variante esponenziale della mappatura, ma nella
-simulazione principale viene usata quella logistica.
+E presente anche la variante esponenziale exp(-kappa * c_s), ma nel flusso
+operativo viene usata la forma logistica.
 
 2) Rischio percepito
 --------------------
 p_t = clip(rho_rischio * (I_t + H_t) / N, 0, 1)
 
-Il rischio percepito dipende da infetti e ospedalizzati, non dai soli infetti.
+Il rischio dipende da infetti non ospedalizzati + ospedalizzati.
 
 3) Best response dei cittadini
 ------------------------------
-3.1 Quadratica
-x_t^* = clip(x_bar - (lambda_rischio * p_t) / eta_compliance, 0, 1)
+3.1 Quadratica:
+x_star = clip(x_bar - (lambda_rischio * p_t) / eta_compliance, 0, 1)
 
-3.2 Logaritmica pura
-U(x) = a * log(x + epsilon) - lambda_rischio * p_t * x - (eta / 2) * (x - x_bar)^2
+3.2 Logaritmica con compliance:
+U(x) = a * log(x + epsilon)
+       - lambda_rischio * p_t * x
+       - (eta_compliance / 2) * (x - x_bar)^2
 
-La best response logaritmica viene trovata numericamente su griglia.
+La best response logaritmica e trovata su griglia [0, 1].
 
-4) Fattore di contatto sociale
-------------------------------
-new_infections_t = f(x_t^*) * beta * S_t * I_t / N
-f(x) = x^potenza, con default potenza = 1.0
+4) Termine di contagio
+----------------------
+f(x_star) = x_star^potenza, con default potenza = 1.0
 
-5) Dinamica epidemiologica
---------------------------
-S_{t+1} = S_t - new_infections_t + new_waning_immunity_t
-I_{t+1} = I_t + new_infections_t - new_hospitalizations_t - gamma * I_t
-H_{t+1} = H_t + new_hospitalizations_t - gamma_h * H_t - delta_h * H_t
-R_{t+1} = R_t + gamma * I_t + gamma_h * H_t - new_waning_immunity_t
-D_{t+1} = D_t + delta_h * H_t
+new_infections_t = f(x_star_t) * beta * S_t * I_t / N
 
-con:
-- new_hospitalizations_t = h * new_infections_{t-tau}
-- gamma_h = 1 / degenza_media_ospedaliera
-- delta_h = tasso_decesso_ospedaliero
-- new_waning_immunity_t = min(omega * R_t, R_t) se le reinfezioni sono abilitate
+5) Dinamica compartimentale con ritardi (implementazione corrente)
+------------------------------------------------------------------
+Flussi costruiti su code storiche:
+- new_hospitalizations_t = h * new_infections_{t - tau_IH}
+- new_recoveries_non_h_t = (1 - h) * new_infections_{t - tau_IR}
+- new_recoveries_h_t = (1 - mu_H) * new_hospitalizations_{t - tau_HR}
+- new_deaths_h_t = mu_H * new_hospitalizations_{t - tau_HD}
+- new_waning_immunity_t = ingressi_in_R_{t - tau_IRS} (se reinfezioni abilitate)
 
-6) Costo del governo su finestra di previsione
-----------------------------------------------
+Aggiornamento stati:
+- S_{t+1} = S_t - new_infections_t + new_waning_immunity_t
+- I_{t+1} = max(0, I_t + new_infections_t - new_hospitalizations_t - new_recoveries_non_h_t)
+- H_{t+1} = max(0, H_t + new_hospitalizations_t - new_recoveries_h_t - new_deaths_h_t)
+- R_{t+1} = max(0, R_t + new_recoveries_non_h_t + new_recoveries_h_t - new_waning_immunity_t)
+- D_{t+1} = max(0, D_t + new_deaths_h_t)
+
+6) Costo del governo su finestra MPC
+------------------------------------
 J(c_s) = J_epidemico + J_controllo
 
-J_epidemico somma nel tempo:
-C_t = c_i * I_t + k * (exp(alpha * (H_t / capacita_ospedaliera)) - 1)
+J_epidemico usa costo istantaneo con:
+- termine lineare su I_t: c_i * I_t
+- termine di saturazione ospedaliera su H_t:
+  k * (exp(alpha * (H_t / capacita_ospedaliera)) - 1), con clipping numerico.
 
-J_controllo:
-lambda_reg_controllo * c_s^2 * (orizzonte + 1)
+J_controllo = lambda_reg_controllo * c_s^2 * (orizzonte + 1)
 
-Il controllo entra quindi in modo diretto tramite la penalizzazione quadratica
-e in modo indiretto modificando la traiettoria prevista di I_t e H_t.
+Il governo ottimizza c_s su griglia in [c_min, c_max].
 
 
-PARAMETRI DEFAULT PRINCIPALI
-============================
+PARAMETRI DEFAULT PRINCIPALI (ALLINEATI AL FILE)
+=================================================
 
 Epidemiologia:
 - N = 100000
-- I_t0 = 10, R_t0 = 0, S_t0 = N - I_t0 - R_t0
+- I_t0 = 10
+- R_t0 = 0
+- S_t0 = N - I_t0 - R_t0
 - beta = 0.3
 - gamma = 0.06
-- T = 2000
+- T = 560
 - R0 = beta / gamma = 5.0
 
 Costo sanitario:
@@ -97,21 +102,22 @@ Costo sanitario:
 - capacita_ospedaliera_infetti = 150.0
 - cap_argomento_exp_saturazione_default = 50.0
 
-Ospedalizzazione e decessi:
+Ospedalizzazione/guarigione/decessi (ritardi espliciti):
 - H_t0_default = 0.0
-- h_ospedalizzazione_default = 0.04
-- tau_ospedalizzazione_default = 8
-- degenza_media_ospedaliera_default = 10.0
-- gamma_ospedaliera_default = 1 / 10
 - D_t0_default = 0.0
-- tasso_decesso_ospedaliero_default = 0.017
+- h_default = 0.04
+- mu_H_default = 0.017
+- tau_IH_default = 8
+- tau_IR_default = 13
+- tau_HR_default = 10
+- tau_HD_default = 7
 
-Controllo / MPC:
+Controllo MPC:
 - lambda_reg_controllo_default = 14.0
 - intervallo_controllo_default = 80
 - orizzonte_predizione_default = 80
 - c_min_default = 0.05
-- c_max_default = 80.0
+- c_max_default = 200.0
 - c_iniziale_default = c_min_default
 - soglia_attivazione_controllo_default = 0.005
 - fattore_isteresi_default = 0.3
@@ -130,21 +136,12 @@ Follower logaritmico:
 - rho_rischio_logaritmica_default = rho_rischio_default
 - num_grid_logaritmica_default = 101
 
-Reinfezione e profili di esecuzione:
+Reinfezioni e profili:
 - considera_reinfezioni_default = True
-- durata_immunita_giorni_default = 240.0
+- tau_IRS_default = 240.0
 - profilo_prudente = "prudente"
 - profilo_target_driven = "target-driven"
-- il profilo prudente disattiva tutte le scansioni
-- il profilo target-driven attiva solo la scansione target_picco
-
-Scansioni e calibrazioni:
-- scansione alpha/lambda per sensibilita del costo epidemico e del controllo
-- scansione soglia/isteresi per la logica di attivazione MPC
-- scansione kappa/eta/rho per il comportamento dei follower
-- calibrazione logaritmica due-stadi su (a, lambda_rischio, rho)
-- scansione target picco su (lambda_reg_controllo, c_max)
-- scansione target picco due-stadi per raffinamento locale
+- default operativo: profilo prudente (scansioni disattivate)
 
 
 FUNZIONI DEFINITE NEL FILE
@@ -187,31 +184,34 @@ Analisi e output:
 - valuta_scenario_target_picco
 - esegui_scansione_target_picco
 - esegui_scansione_target_picco_due_stadi
+- main
+- esegui_confronto_quadratica_vs_logaritmica
+- genera_grafici_confronto
 
 
-FLUSSO RUN PRINCIPALE (EFFETTIVO)
-=================================
+FLUSSO PRINCIPALE EFFETTIVO
+===========================
 
-Il blocco finale del file usa if __name__ == "__main__" e chiama main().
-La run principale:
+Il blocco finale usa if __name__ == "__main__" e chiama main().
 
-1) stampa intestazione simulazione e stato delle reinfezioni
-2) esegue una simulazione quadratica completa con MPC periodico
-3) esegue una simulazione logaritmica completa con MPC periodico
-4) calcola e stampa le metriche comparative:
-   - picco infetti e giorno del picco
-   - picco ospedalizzati e giorno del picco ospedalizzati
-   - decessi cumulati finali
-   - costo totale epidemico con controllo variabile
-   - compliance media x*/x_bar
-   - gap medio x* - x_bar
-5) stampa i delta logaritmica - quadratica
-6) genera i grafici e li salva in PNG
-7) mostra i grafici se mostra_grafici_default = True
+main() esegue:
+1) stampa intestazione simulazione e stato reinfezioni;
+2) simulazione completa con best response quadratica;
+3) simulazione completa con best response logaritmica;
+4) calcolo e stampa metriche comparative:
+   - picco infetti e giorno;
+   - picco ospedalizzati e giorno;
+   - decessi finali cumulati;
+   - costo epidemico totale (con controllo variabile);
+   - complianza media x_star/x_bar;
+   - gap medio x_star - x_bar;
+5) stampa dei delta (logaritmica - quadratica);
+6) generazione e salvataggio grafici;
+7) visualizzazione grafici se mostra_grafici_default = True.
 
 
-OUTPUT GRAFICI SALVATI NELLA RUN CORRENTE
-==========================================
+OUTPUT GRAFICI SALVATI
+======================
 
 - sir_compartimenti_stackelberg_quadratica.png
 - sir_stackelberg_analisi_quadratica.png
@@ -222,8 +222,7 @@ OUTPUT GRAFICI SALVATI NELLA RUN CORRENTE
 NOTE DI ALLINEAMENTO
 ====================
 
-- Questa descrizione riflette lo stato attuale del codice e non il vecchio
-  assetto SIR semplificato.
-- Le scansioni restano disponibili per confronto e calibrazione, ma non sono
-  chiamate automaticamente da main().
-- I default riportati sopra corrispondono ai valori definiti nel file Python.
+- Questa descrizione riflette lo stato attuale del file Python.
+- Le scansioni/calibrazioni sono disponibili ma non sono parte del flusso
+  automatico di main() in profilo prudente.
+- I default qui riportati sono quelli definiti nel codice corrente.
